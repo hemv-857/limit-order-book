@@ -4,6 +4,7 @@
 #include "core/validate.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <utility>
 
@@ -583,6 +584,13 @@ void Engine::rest_remainder(SymbolState& st, OrderIndex order_idx) noexcept {
   emit_delta(st, o.level, UpdateAction::Added);
 }
 
+Book& Engine::book_of(SymbolState& st, const Order& order) noexcept {
+  if (is_stop_type(order.type)) {
+    return order.side == Side::Buy ? st.stops_buy : st.stops_sell;
+  }
+  return st.book;
+}
+
 void Engine::remove_order(SymbolState& st, OrderIndex idx, CancelReason reason,
                           Timestamp ts) noexcept {
   if (idx == kNullOrder) {
@@ -593,9 +601,17 @@ void Engine::remove_order(SymbolState& st, OrderIndex idx, CancelReason reason,
   const LevelIndex lvl = o.level;
   const bool resting = o.is_resting();
   if (resting) {
-    st.book.remove_from_queue(idx);
-    emit_delta(st, lvl,
-               st.book.level_at(lvl).empty() ? UpdateAction::Removed : UpdateAction::Changed);
+    // Unlink from the book this order actually lives in. Using the liquidity
+    // book unconditionally would splice a stop's queue links into a liquidity
+    // level and silently destroy that level's contents.
+    Book& book = book_of(st, o);
+    book.remove_from_queue(idx);
+    if (&book == &st.book) {
+      // Only liquidity changes are published as L2 deltas; a stop is not
+      // displayed liquidity and must not appear in the market data feed.
+      emit_delta(st, lvl,
+                 book.level_at(lvl).empty() ? UpdateAction::Removed : UpdateAction::Changed);
+    }
   }
   st.index.erase(o.order_id);
   st.arena.release(idx);
@@ -621,7 +637,7 @@ void Engine::retire_order(SymbolState& st, OrderIndex idx) noexcept {
   st.removed_qty += static_cast<std::uint64_t>(st.arena[idx].leaves_qty.value);
   const OrderId id = st.arena[idx].order_id;
   if (st.arena[idx].is_resting()) {
-    st.book.remove_from_queue(idx);
+    book_of(st, st.arena[idx]).remove_from_queue(idx);
   }
   st.index.erase(id);
   st.arena.release(idx);
@@ -676,6 +692,15 @@ void Engine::submit(const ReplaceRequest& request) noexcept {
   }
 
   Order& o = st->arena[idx];
+
+  // A pending stop lives in a stop book, not the liquidity book. Replacing it
+  // has to move it within that book; running the liquidity path would splice a
+  // stop's links into a liquidity level and corrupt it.
+  if (is_stop_type(o.type)) {
+    replace_stop_order(*st, request);
+    return;
+  }
+
   if (request.new_quantity.value < o.filled_qty.value) {
     Event e = new_event(request.symbol, EventType::Rejected, request.ts);
     e.order_id = request.order_id;
@@ -769,6 +794,73 @@ void Engine::submit(const ReplaceRequest& request) noexcept {
   }
 }
 
+void Engine::replace_stop_order(SymbolState& st, const ReplaceRequest& request) noexcept {
+  const OrderIndex idx = st.index.find_any(request.order_id);
+  Order& o = st.arena[idx];
+  const Timestamp ts = request.ts;
+
+  if (request.new_quantity.value < o.filled_qty.value) {
+    Event e = new_event(request.symbol, EventType::Rejected, ts);
+    e.order_id = request.order_id;
+    e.reject_code = RejectCode::ReplaceWouldReduceBelowFilled;
+    events_.push_back(e);
+    return;
+  }
+  if (request.new_quantity.value == o.total_qty.value) {
+    Event e = new_event(request.symbol, EventType::Rejected, ts);
+    e.order_id = request.order_id;
+    e.reject_code = RejectCode::ReplaceNoPriceChange;
+    events_.push_back(e);
+    return;
+  }
+  if (request.new_quantity.value == 0) {
+    remove_order(st, idx, CancelReason::ClientRequest, ts);
+    return;
+  }
+  // A price change cannot apply to a pending stop: its price is its trigger.
+  if (request.new_price.value != 0 && request.new_price.value != o.price.value) {
+    Event e = new_event(request.symbol, EventType::Rejected, ts);
+    e.order_id = request.order_id;
+    e.reject_code = RejectCode::ReplaceNoPriceChange;
+    events_.push_back(e);
+    return;
+  }
+
+  Book& book = o.side == Side::Buy ? st.stops_buy : st.stops_sell;
+  const LevelIndex lvl = o.level;
+  const std::int64_t old_leaves = o.leaves_qty.value;
+  const bool increased = request.new_quantity.value > o.total_qty.value;
+
+  const std::int64_t qty_delta = request.new_quantity.value - o.total_qty.value;
+  if (qty_delta < 0) {
+    st.removed_qty += static_cast<std::uint64_t>(-qty_delta);
+  } else if (qty_delta > 0) {
+    st.accepted_qty += static_cast<std::uint64_t>(qty_delta);
+  }
+
+  if (increased) {
+    // Growing a stop loses priority, exactly as for a resting order.
+    book.remove_from_queue(idx);
+    o.total_qty = request.new_quantity;
+    o.leaves_qty = Quantity{request.new_quantity.value - o.filled_qty.value};
+    st.arena[idx].level = lvl;
+    (void)book.add_to_queue(idx);
+  } else {
+    o.total_qty = request.new_quantity;
+    o.leaves_qty = Quantity{request.new_quantity.value - o.filled_qty.value};
+    book.reduce_level(lvl, Quantity{old_leaves - o.leaves_qty.value});
+  }
+
+  Event e = new_event(request.symbol, EventType::Replaced, ts);
+  e.order_id = o.order_id;
+  e.participant = o.participant;
+  e.side = o.side;
+  e.price = o.price;
+  e.qty = o.total_qty;
+  e.leaves_qty = o.leaves_qty;
+  events_.push_back(e);
+}
+
 // ---------------------------------------------------------------------------
 // Mass cancel
 // ---------------------------------------------------------------------------
@@ -779,20 +871,25 @@ void Engine::submit(const MassCancelRequest& request) noexcept {
   // because removing an order mutates the very links being walked.
   for (const std::unique_ptr<SymbolState>& up : states_) {
     SymbolState& st = *up;
-    std::size_t n = 0;
-    for (LevelIndex lvl = 0; lvl < st.book.domain(); ++lvl) {
-      if (st.book.level_at(lvl).empty()) {
-        continue;
-      }
-      for (OrderIndex cur = st.book.level_at(lvl).head; cur != kNullOrder;
-           cur = st.arena[cur].next) {
-        if (st.arena[cur].participant.value == request.participant.value) {
-          st.scratch[n++] = cur;
+    // All three books: a mass cancel that left a participant's pending stops
+    // alive would be a surprising half-measure, and stops are orders too.
+    const std::array<Book*, 3> books = {&st.book, &st.stops_buy, &st.stops_sell};
+    for (Book* book : books) {
+      std::size_t n = 0;
+      for (LevelIndex lvl = 0; lvl < book->domain(); ++lvl) {
+        if (book->level_at(lvl).empty()) {
+          continue;
+        }
+        for (OrderIndex cur = book->level_at(lvl).head; cur != kNullOrder;
+             cur = st.arena[cur].next) {
+          if (st.arena[cur].participant.value == request.participant.value) {
+            st.scratch[n++] = cur;
+          }
         }
       }
-    }
-    for (std::size_t i = 0; i < n; ++i) {
-      remove_order(st, st.scratch[i], CancelReason::ClientRequest, request.ts);
+      for (std::size_t i = 0; i < n; ++i) {
+        remove_order(st, st.scratch[i], CancelReason::ClientRequest, request.ts);
+      }
     }
   }
 }

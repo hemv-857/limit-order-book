@@ -292,6 +292,13 @@ class Engine {
   /// conservation law leaks. A stop that triggers into an order which no longer
   /// validates -- a stop-limit whose limit price is outside the collar, say -- is
   /// rejected with a code rather than silently dropped.
+  /// Replace a pending stop's quantity, within its own stop book.
+  ///
+  /// A stop cannot change price while pending -- its price *is* its trigger --
+  /// so only the quantity can be amended. Priority is kept, as for a plain
+  /// quantity decrease.
+  void replace_stop_order(SymbolState& st, const ReplaceRequest& request) noexcept;
+
   void fail_new(SymbolState& st, const NewOrderRequest& r, RejectCode code,
                 bool counts_as_acceptance) noexcept {
     if (!counts_as_acceptance) {
@@ -328,6 +335,16 @@ class Engine {
   void execute_fill(SymbolState& st, OrderIndex aggressor_idx, OrderIndex maker_idx,
                     Timestamp ts) noexcept;
   void rest_remainder(SymbolState& st, OrderIndex order_idx) noexcept;
+
+  /// The book an order is linked into.
+  ///
+  /// A symbol has three price structures -- resting liquidity, buy stops, sell
+  /// stops -- over one shared arena, so an order's `level` index is only
+  /// meaningful together with which structure it belongs to. A pending stop is
+  /// recognisable because its type is still Stop/StopLimit: when a stop
+  /// triggers it is unlinked and a *new* order is created, so a slot still
+  /// carrying a stop type is unambiguously sitting in a stop book.
+  [[nodiscard]] static Book& book_of(SymbolState& st, const Order& order) noexcept;
 
   /// Unlink, unindex and free a resting order, emitting Cancelled.
   void remove_order(SymbolState& st, OrderIndex idx, CancelReason reason, Timestamp ts) noexcept;

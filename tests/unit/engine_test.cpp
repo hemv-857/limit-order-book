@@ -709,6 +709,101 @@ TEST_F(EngineTest, BuyStopTriggersWhenPriceReachesTheTrigger) {
   ExpectInvariants(e);
 }
 
+TEST_F(EngineTest, CancellingAPendingStopLeavesLiquidityIntact) {
+  // Regression: remove_order unlinked through the *liquidity* book regardless of
+  // where the order actually rested. Cancelling a pending stop therefore spliced
+  // the stop's queue links into a liquidity level and destroyed that level's
+  // contents -- a resting bid at the same price silently vanished.
+  Engine e = make_one();
+  e.submit(ord(OrderId{1}, Side::Buy, Price{100}, Quantity{10}, ParticipantId{2}));
+  auto stop = ord(OrderId{2}, Side::Buy, Price{0}, Quantity{7}, ParticipantId{1}, OrderType::Stop);
+  stop.trigger_price = Price{100};
+  e.submit(stop);
+  e.clear_events();
+
+  ASSERT_EQ(e.book(kSym).top_of_book().best_bid_qty.value, 10);
+
+  CancelRequest c;
+  c.seq = Sequence{++g_seq};
+  c.ts = Timestamp{++g_ts};
+  c.symbol = kSym;
+  c.order_id = OrderId{2};
+  c.participant = ParticipantId{1};
+  e.submit(c);
+
+  // The liquidity book is untouched.
+  const TopOfBook tob = e.book(kSym).top_of_book();
+  ASSERT_TRUE(tob.has_bid);
+  EXPECT_EQ(tob.best_bid_qty.value, 10);
+  EXPECT_EQ(tob.best_bid_orders, 1u);
+  EXPECT_TRUE(e.stop_buy_book(kSym).top_of_book().empty());
+  ExpectInvariants(e);
+}
+
+TEST_F(EngineTest, ReplacingAPendingStopKeepsItInTheStopBook) {
+  Engine e = make_one();
+  e.submit(ord(OrderId{1}, Side::Buy, Price{100}, Quantity{10}, ParticipantId{2}));
+  auto stop = ord(OrderId{2}, Side::Buy, Price{0}, Quantity{7}, ParticipantId{1}, OrderType::Stop);
+  stop.trigger_price = Price{100};
+  e.submit(stop);
+  e.clear_events();
+
+  ReplaceRequest r;
+  r.seq = Sequence{++g_seq};
+  r.ts = Timestamp{++g_ts};
+  r.symbol = kSym;
+  r.order_id = OrderId{2};
+  r.participant = ParticipantId{1};
+  r.new_quantity = Quantity{9};
+  e.submit(r);
+
+  ASSERT_EQ(e.events()[0].type, EventType::Replaced);
+  // The stop's quantity moved; the liquidity level did not.
+  EXPECT_EQ(e.stop_buy_book(kSym).top_of_book().best_bid_qty.value, 9);
+  EXPECT_EQ(e.book(kSym).top_of_book().best_bid_qty.value, 10);
+  ExpectInvariants(e);
+}
+
+TEST_F(EngineTest, ReplacingAPendingStopPriceIsRejected) {
+  // A pending stop's price *is* its trigger, so there is no price to change.
+  Engine e = make_one();
+  auto stop = ord(OrderId{2}, Side::Buy, Price{0}, Quantity{7}, ParticipantId{1}, OrderType::Stop);
+  stop.trigger_price = Price{100};
+  e.submit(stop);
+  e.clear_events();
+
+  ReplaceRequest r;
+  r.seq = Sequence{++g_seq};
+  r.ts = Timestamp{++g_ts};
+  r.symbol = kSym;
+  r.order_id = OrderId{2};
+  r.participant = ParticipantId{1};
+  r.new_price = Price{105};
+  r.new_quantity = Quantity{7};
+  e.submit(r);
+  EXPECT_EQ(last(e).reject_code, RejectCode::ReplaceNoPriceChange);
+}
+
+TEST_F(EngineTest, MassCancelAlsoRemovesPendingStops) {
+  Engine e = make_one();
+  auto stop = ord(OrderId{1}, Side::Buy, Price{0}, Quantity{7}, ParticipantId{1}, OrderType::Stop);
+  stop.trigger_price = Price{100};
+  e.submit(stop);
+  e.submit(ord(OrderId{2}, Side::Sell, Price{100}, Quantity{5}, ParticipantId{2}));
+  e.clear_events();
+
+  MassCancelRequest m;
+  m.seq = Sequence{++g_seq};
+  m.ts = Timestamp{++g_ts};
+  m.participant = ParticipantId{1};
+  e.submit(m);
+  EXPECT_EQ(count_of(e, EventType::Cancelled), 1u);
+  EXPECT_TRUE(e.stop_buy_book(kSym).top_of_book().empty());
+  // The other participant's order is untouched.
+  EXPECT_EQ(e.book(kSym).top_of_book().best_ask_qty.value, 5);
+  ExpectInvariants(e);
+}
+
 TEST_F(EngineTest, BuyStopBelowTheLastTradeIsRejectedAsWrongSide) {
   Engine e = make_one();
   e.submit(ord(OrderId{1}, Side::Sell, Price{100}, Quantity{10}, ParticipantId{2}));

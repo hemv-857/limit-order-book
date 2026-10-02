@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lob {
@@ -108,7 +109,13 @@ TEST(InvariantProbe, MixedStreamKeepsEveryInvariant) {
   std::uint64_t seq = 0;
   std::int64_t ts = 0;
   std::uint64_t next_id = 1;
-  std::vector<OrderId> live;
+  // owner[id] records which participant submitted each order, so cancel and
+  // replace can name the *correct* participant and actually reach the removal
+  // paths. Picking a random participant instead means nearly every cancel is
+  // rejected as UnknownOrder, and the removal code goes almost untested --
+  // which is exactly how a bug that spliced a stop's queue links into a
+  // liquidity level survived a 20-million-operation run.
+  std::vector<std::pair<OrderId, std::uint32_t>> live;
 
   for (std::int64_t i = 0; i < ops; ++i) {
     const std::uint32_t roll = rng.below(100);
@@ -150,7 +157,7 @@ TEST(InvariantProbe, MixedStreamKeepsEveryInvariant) {
       }
       n.post_only = rng.below(16U) == 0U;
       engine.submit(n);
-      live.push_back(n.order_id);
+      live.emplace_back(n.order_id, n.participant.value);
 
     } else if (roll < 70U) {
       const std::size_t pick = rng.below(static_cast<std::uint32_t>(live.size()));
@@ -158,9 +165,17 @@ TEST(InvariantProbe, MixedStreamKeepsEveryInvariant) {
       c.seq = Sequence{++seq};
       c.ts = Timestamp{++ts};
       c.symbol = SymbolId{0};
-      c.order_id = live[pick];
-      c.participant = ParticipantId{1U + rng.below(6U)};
+      c.order_id = live[pick].first;
+      // Right owner most of the time; occasionally the wrong one, so the
+      // UnknownOrder path is covered too.
+      c.participant = ParticipantId{rng.below(8U) == 0U ? 99U : live[pick].second};
       engine.submit(c);
+      // Swap-and-pop, not erase: `live` grows without bound over millions of
+      // operations, and an O(n) erase in the middle turned the harness into the
+      // slowest thing in the build. Order within `live` is irrelevant because
+      // picks are random.
+      live[pick] = live.back();
+      live.pop_back();
 
     } else if (roll < 85U) {
       const std::size_t pick = rng.below(static_cast<std::uint32_t>(live.size()));
@@ -168,8 +183,8 @@ TEST(InvariantProbe, MixedStreamKeepsEveryInvariant) {
       r.seq = Sequence{++seq};
       r.ts = Timestamp{++ts};
       r.symbol = SymbolId{0};
-      r.order_id = live[pick];
-      r.participant = ParticipantId{1U + rng.below(6U)};
+      r.order_id = live[pick].first;
+      r.participant = ParticipantId{live[pick].second};
       if (rng.below(2U) == 0U) {
         r.new_price = Price{50'000 + static_cast<std::int64_t>(rng.below(200U))};
         r.new_quantity = Quantity{static_cast<std::int64_t>(1U + rng.below(50U))};

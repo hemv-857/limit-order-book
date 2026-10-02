@@ -52,8 +52,8 @@ floating point, zero heap allocation on the hot path.
 
 ### `tests/`
 
-96 tests across `tests/unit` (book, engine semantics, zero-allocation proof) and
-`tests/property` (randomised invariants).
+100 tests across `tests/unit` (book, engine semantics, zero-allocation proof)
+and `tests/property` (randomised invariants).
 
 ### Tooling
 
@@ -75,9 +75,9 @@ specification assumed.
 
 | Measurement | Result |
 |---|---|
-| Test suite, `release` | 96 / 96 |
-| Test suite, `asan-ubsan` | 96 / 96 |
-| Test suite, `tsan` | 96 / 96 |
+| Test suite, `release` | 100 / 100 |
+| Test suite, `asan-ubsan` | 100 / 100 |
+| Test suite, `tsan` | 100 / 100 |
 | Randomised invariant probe | 20,000,000 ops clean |
 | Throughput, mixed stream | 1,750,217 ops/s (mean of 3) |
 | State hash across 3 runs | identical |
@@ -143,6 +143,23 @@ built so far.
 12. **`lowest_occupied()`/`highest_occupied()` returned inverted results**, being
     implemented with the *nearest*-occupied scans. Stops triggered on the wrong
     side of the book.
+
+### Found by direct probing and the strengthened invariant probe
+
+16. **`remove_order` unlinked through the liquidity book unconditionally.** A
+    pending stop lives in `stops_buy`/`stops_sell`, so cancelling one spliced its
+    queue links into a *liquidity* level: a resting bid at the same price
+    silently vanished, the aggregate went negative, and the book stopped
+    reporting its own top of book. Found by hand-probing a path the randomised
+    probe was not reaching.
+17. **The same bug in replace**, plus **`mass_cancel` ignored stops entirely** —
+    a participant's "cancel everything" left their pending stops alive.
+    Replace of a stop now amends quantity only (a stop's price *is* its trigger).
+
+The reason the probe missed 16 and 17 is worth recording: it cancelled using a
+**random participant**, so nearly every cancel was rejected as `UnknownOrder` and
+the removal code went almost untested. The probe now names each order's actual
+owner, and 20,000,000 operations still come back clean.
 
 ### Found by the randomised invariant probe
 

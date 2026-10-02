@@ -111,9 +111,9 @@ Taken on the machine below. Numbers are from running the code, not estimated.
 
 | Preset | Result |
 |---|---|
-| `release` | **96 / 96 passed** |
-| `asan-ubsan` | **96 / 96 passed** |
-| `tsan` | **96 / 96 passed** |
+| `release` | **100 / 100 passed** |
+| `asan-ubsan` | **100 / 100 passed** |
+| `tsan` | **100 / 100 passed** |
 | `clang-tidy` | **0 findings** in first-party code |
 | `clang-format --check` | clean |
 
@@ -124,9 +124,15 @@ icebergs, post-only, cancel, replace, mass cancel, session end) with all nine
 invariants re-checked every 1024 operations:
 
 ```
-probe: 20000000 ops, state_hash=fbcf2841fd2395c8
-[       OK ] InvariantProbe.MixedStreamKeepsEveryInvariant (69915 ms)
+probe: 20000000 ops, state_hash=6505e777fe8b289e
+[       OK ] InvariantProbe.MixedStreamKeepsEveryInvariant (256801 ms)
 ```
+
+Cancel and replace name the order's **actual** owner, so the removal paths are
+genuinely exercised. An earlier version picked a random participant, which meant
+almost every cancel was rejected as `UnknownOrder` — and a bug that spliced a
+stop's queue links into a liquidity level survived 20,000,000 operations
+unnoticed. See `docs/FINAL_REPORT.md`.
 
 ### Throughput
 
