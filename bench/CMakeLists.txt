@@ -1,0 +1,2 @@
+add_executable(bench_smoke smoke_benchmark.cpp)
+target_link_libraries(bench_smoke PRIVATE lob_core benchmark::benchmark_main lob_warnings)

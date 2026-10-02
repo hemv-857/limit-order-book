@@ -1,0 +1,39 @@
+---
+# clang-tidy runs against the first-party sources only; third-party fetched code
+# is excluded so upstream style never fails our build.
+Checks: >
+  bugprone-*,
+  cert-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-implicit-bool-conversion,
+  -readability-braces-around-statements,
+  -portability-avoid-pragma-once
+
+WarningsAsErrors: >
+  bugprone-*,
+  cert-*,
+  concurrency-*,
+  performance-*,
+  portability-*
+
+HeaderFilterRegex: '(src|tools|tests|bench|fuzz)/.*\.(hpp|cpp)$'
+FormatStyle: file
+
+CheckOptions:
+  - key: cppcoreguidelines-avoid-magic-numbers
+    value: 'false'
+  - key: readability-function-cognitive-complexity
+    value: '80'
+  - key: readability-identifier-naming
+    value: 'None'

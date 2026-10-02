@@ -1,0 +1,36 @@
+# Build trees (one per preset)
+build/
+
+# Local, repo-scoped toolchain installed by scripts/bootstrap.sh.
+# Deliberately not a system install: nothing outside this repo is modified.
+.venv/
+
+# Fetched third-party sources and coverage output
+_deps/
+*.gcda
+*.gcno
+coverage.info
+coverage-html/
+lcov.info
+
+# Corpus crash artefacts. The committed corpus lives in fuzz/corpus/*, so a
+# crash artefact must never silently join it.
+fuzz/corpus/**/crash-*
+fuzz/corpus/**/leak-*
+fuzz/corpus/**/timeout-*
+fuzz/corpus/**/oom-*
+*.tmp
+
+# Runtime artefacts
+runtime/
+*.journal
+*.snapshot
+*.log
+
+# Editor / OS noise
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+*.swp
+.DS_Store

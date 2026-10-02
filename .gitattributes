@@ -1,0 +1,7 @@
+# Normalise line endings and make text diffs behave in review.
+* text=auto eol=lf
+
+# Binary-ish artefacts that must never be line-ending mangled or diffed.
+*.jpg binary
+*.png binary
+*.gz  binary
