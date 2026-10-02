@@ -16,7 +16,7 @@ how it was found, and what remains. Milestone checkboxes are in
 | M1 — core types, order book, zero-allocation proof | **Done** |
 | M2a — order types, TIFs, STP, risk, stops, replace | **Done** |
 | M2b — randomised invariant probe | **Done** |
-| M2c — reference engine + differential test | **Built, not passing; cause open** |
+| M2c — reference engine + differential test | **Complete and passing** |
 | M3 — journal, snapshots, recovery | Not started |
 | M4 — engine runtime, SPSC pipeline | Not started |
 | M5 — gateway, wire protocol, market data | Not started |
@@ -75,10 +75,10 @@ specification assumed.
 
 | Measurement | Result |
 |---|---|
-| Test suite, `release` | 103 / 103 |
-| Test suite, `asan-ubsan` | 103 / 103 |
-| Test suite, `tsan` | 103 / 103 |
-| Differential vs reference | **2 tests disabled: known divergence, see below** |
+| Test suite, `release` | 110 / 110 |
+| Test suite, `asan-ubsan` | 110 / 110 |
+| Test suite, `tsan` | 110 / 110 |
+| Differential vs reference | 110 / 110, all scenarios and a 24-seed sweep |
 | Randomised invariant probe | 20,000,000 ops clean |
 | Throughput, mixed stream | 1,750,217 ops/s (mean of 3) |
 | State hash across 3 runs | identical |
@@ -161,52 +161,76 @@ built so far.
 Both are exactly the class of defect the unit tests and invariants could not
 reach: individually plausible, only wrong when read as a stream.
 
-**The differential test does not yet pass.** The two engines still diverge, and
-two divergences were observed:
+**The differential test now passes** across all eight scenarios and a 24-seed
+sweep. Getting there required finding the cause, which turned out to be two
+independent defects that the "shared side-agnostic bitmap" theory did not
+explain.
 
-1. `plain`, around op 486: a FOK buy sweeps levels 16, 17, ... in the production
-   engine but 16, 22, ... in the reference, and the engine's resulting book is
-   left **crossed** (bid 17x3 against ask 17x3).
-2. `stp_cancel_oldest`, around op 1495, and a multi-seed sweep that stalls on
-   at least one seed.
+### The bug that mattered: an unbounded loop in the matching engine
 
-A crossed book is a serious defect -- it means a trade printed where the
-opposite side was resting -- so this is not cosmetic and it is not finished.
+Chasing the open divergence first turned up something worse. The 24-seed sweep
+was not slow, it was **hanging**. A stack sample pinned it to `Engine::match`
+spinning on itself.
 
-**Root cause is not established, and the two candidate fixes below are
-unverified.** The obvious suspect is that the level-occupancy bitmap is shared by
-both sides, so the side-agnostic `next/prev_occupied_index` walks can step onto a
-level holding the opposite side. That would be wrong in two places: refreshing
-`best_bid_`/`best_ask_`, and the FOK availability pre-check (which could count ask
-liquidity while checking a sell FOK). Both are now routed through side-aware
-`find_bid_below` / `find_ask_above` scans.
+Root cause, found by wiring the existing `Book::check_invariants` into the
+harness after *every* operation -- which it had never done. It tripped at op 87
+of the pinned seed with `non-positive leaves quantity`, and the operation
+immediately before it was:
 
-**However: attempts to reproduce either defect as a unit test failed.** With the
-fix reverted, the equivalent unit tests still passed, and the crossed-book
-configuration could not be constructed by hand at all -- in a non-crossed book no
-ask can sit below the best bid, so a plain bitmap scan cannot reach an
-ask-level that way. That makes the crossed book, most likely, a *consequence* of
-some earlier divergence rather than the cause, or evidence of a third defect that
-has not been found.
+```
+replace id=49 newpx=2 newqty=17
+```
 
-So: the scans are strictly narrowing (they can only skip a level the old code
-would have wrongly counted) and are kept as hardening, but they are **not**
-claimed to fix the divergence. No regression test is claimed for them, because
-none was shown to fail without the change. The real cause remains open.
+`new_quantity` is the order's new **total**, and order 49 already had 17 filled.
+So the replace set `leaves_qty = 17 - 17 = 0` and left the order **linked into
+the book with zero quantity**. That state is invisible to every structural
+check: the level's aggregate equals the sum over its orders, because both are
+zero, and the queue links are intact. The only thing wrong is that the order
+cannot trade.
 
-The harness is committed, still built, and reproduces the divergences on demand
-with `LOB_DIFF_OPS=<n>`; the two differential tests are `DISABLED_` rather than
-left failing, and the open state is documented at the call site. Isolating the
-cause is the next piece of work, and it should start by dumping both books
-immediately before the first divergent operation.
+The consequence is what makes it severe. `execute_fill` computes
+`fill = min(taker.leaves, maker.visible)` = 0, returns without doing anything,
+and `match`'s `while (true)` re-reads the same maker. **No progress, forever.**
+An unbounded loop in the matching engine is a hung venue, not a wrong answer.
 
-Building the reference also found four bugs in the *reference itself*, which is
-the expected yield and a useful sign the harness has teeth: an aggressor was
-unremovable because "in the id map" and "linked into a queue" were conflated;
-cancellation and mass-cancel collected victims in a different order from the
-engine; an order re-inserted after a priority-losing replace got a
-default-constructed Entry and lost its side; and stop-trigger collection iterated
-a std::map it was concurrently erasing.
+Fixed in both replace paths (resting and stop) by treating a new total at or
+below the already-filled quantity as a cancel, which is what the existing
+`new_quantity == 0` special case was reaching for. `Book::add_to_queue` now
+asserts `leaves_qty > 0`, so this class of bug surfaces at the point of creation
+instead of as a hang later.
+
+### And the crossed book: a replace that lands across the book
+
+With the hang gone the harness ran to op 1074 and reported
+`book is crossed` -- bid 3x16 against ask 1x26 -- in **both** engines, so the
+differential could not settle it and the cause had to be reasoned about.
+
+The trace ended at `replace id=582 newpx=1 newqty=26`, moving a resting offer to
+a price at or below the resting bid. **A replace never re-runs matching**, so
+nothing stopped the order being restated on the far side of the book. Both
+implementations did the same thing because both were written from the same
+reading of the spec, which defined price-change priority but was silent on
+crossing.
+
+A replace must never leave the book crossed, so the rule added is to reject it:
+`ReplaceWouldCross` (reject code 25). Rejecting rather than matching keeps
+replace deterministic and keeps the book uncrossed by construction, without
+inventing new matching semantics for a path that previously had none.
+
+### What the earlier diagnosis got wrong
+
+The "shared side-agnostic occupancy bitmap" theory was a plausible story fitted
+to one trace, and it was wrong: attempts to reproduce the crossed book as a unit
+test failed, because in a non-crossed book no ask can sit below the best bid,
+so a plain bitmap scan has no ask-level to reach. The crossed book was a
+*symptom* of a replace that rested across the book. The side-aware
+`find_bid_below` / `find_ask_above` scans are still in the tree as hardening --
+they can only skip a level the old code would have wrongly counted -- but they
+are not what fixed anything, and nothing is claimed for them.
+
+The lesson worth keeping: a plausible mechanism that explains the symptom is not
+a root cause. Both bugs here were found by instrumenting the *invariant that
+already existed* and running it every operation, not by more staring at traces.
 
 ### Found by direct probing and the strengthened invariant probe
 
@@ -277,12 +301,10 @@ Full list in [PLAN.md](PLAN.md) §7.
 
 ## Known limitations and risks
 
-1. **The differential test does not pass yet.** The reference engine exists and
-   has already found two real L2-stream defects in the production engine (items
-   18 and 19), but the engines still diverge on a FOK sweep that leaves the
-   production book crossed. Until that is resolved, the engine is still verified
-   by invariants and self-consistency rather than against a second
-   implementation — which is the gap this whole milestone existed to close.
+1. ~~The differential test does not pass yet.~~ **Resolved.** It now agrees across all
+   eight scenarios and a 24-seed sweep, after finding an unbounded loop in the
+   matching engine and a replace that could rest across the book. Both are
+   described above.
 2. **The throughput target is not met** and no profiling has been done to find
    out why. Candidate costs that have not been investigated: `Event` is ~120
    bytes and copied on every emit; `execute_fill` captures many maker/taker

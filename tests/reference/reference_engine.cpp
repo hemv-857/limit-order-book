@@ -680,8 +680,25 @@ void ReferenceEngine::replace_stop(Symbol& s, const ReplaceRequest& request) {
     events_.push_back(e);
     return;
   }
-  if (request.new_quantity.value == 0) {
+  // new_quantity is the order's new *total*. Anything at or below the already
+  // filled quantity leaves zero remaining, which is a cancel, not a replace.
+  // Getting this wrong rests a zero-quantity order.
+  if (request.new_quantity.value <= o.filled.value) {
     cancel_live(s, request.order_id, CancelReason::ClientRequest, ts);
+    return;
+  }
+  // A pending stop's price is its trigger, so a price change relocates it in the
+  // stop book. It must not end up immediately executable against the resting
+  // book. Checked in the same position as the engine so the two agree on which
+  // rejection wins.
+  if (request.new_price.value != 0 && request.new_price.value != o.price.value &&
+      (o.side == Side::Buy
+           ? (!s.asks.empty() && request.new_price.value >= s.asks.begin()->first.value)
+           : (!s.bids.empty() && request.new_price.value <= s.bids.rbegin()->first.value))) {
+    Event e = new_event(request.symbol, EventType::Rejected, ts);
+    e.order_id = request.order_id;
+    e.reject_code = RejectCode::ReplaceWouldCross;
+    events_.push_back(e);
     return;
   }
   // A pending stop's price is its trigger, so there is no price to change.
@@ -783,7 +800,10 @@ void ReferenceEngine::submit(const ReplaceRequest& request) {
     events_.push_back(e);
     return;
   }
-  if (request.new_quantity.value == 0) {
+  // new_quantity is the order's new *total*. Anything at or below the already
+  // filled quantity leaves zero remaining, which is a cancel, not a replace.
+  // Getting this wrong rests a zero-quantity order.
+  if (request.new_quantity.value <= o.filled.value) {
     cancel_live(s, request.order_id, CancelReason::ClientRequest, request.ts);
     return;
   }
@@ -793,6 +813,18 @@ void ReferenceEngine::submit(const ReplaceRequest& request) {
     Event e = new_event(request.symbol, EventType::Rejected, request.ts);
     e.order_id = request.order_id;
     e.reject_code = RejectCode::PriceOutOfRange;
+    events_.push_back(e);
+    return;
+  }
+  // A replace never re-runs matching, so a price change that crosses the opposite
+  // touch would rest the order on the far side of the book. Rejected rather than
+  // matched, so the book cannot be left crossed. Mirrors the engine's ordering.
+  if (price_changed &&
+      (o.side == Side::Buy ? (!s.asks.empty() && target.value >= s.asks.begin()->first.value)
+                           : (!s.bids.empty() && target.value <= s.bids.rbegin()->first.value))) {
+    Event e = new_event(request.symbol, EventType::Rejected, request.ts);
+    e.order_id = request.order_id;
+    e.reject_code = RejectCode::ReplaceWouldCross;
     events_.push_back(e);
     return;
   }

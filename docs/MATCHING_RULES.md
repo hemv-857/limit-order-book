@@ -148,7 +148,22 @@ notional limits to the result *before* applying it.)
 
 Rejections: `ReplaceWouldReduceBelowFilled` if the new total is below what has
 already executed; `ReplaceNoPriceChange` if nothing would change;
-`PriceOutOfRange` if the new price is outside the domain.
+`PriceOutOfRange` if the new price is outside the domain; and
+`ReplaceWouldCross` if a price change would land the order at or through the
+opposite touch.
+
+Two rules here exist because leaving them out produces a broken book rather than
+a wrong answer:
+
+- A new total **at or below** the already-executed quantity leaves zero
+  remaining, so it is a **cancel**, not a replace. Resting a zero-quantity order
+  is structurally invisible — its level aggregate equals the sum over its
+  orders, because both are zero — but it cannot trade, and a matching loop that
+  reaches it computes a zero fill, makes no progress and spins forever.
+- A replace never re-runs matching, so a price change that crosses would rest
+  the order on the far side of the book. It is rejected rather than matched: that
+  keeps the book uncrossed by construction and keeps replace deterministic,
+  without inventing matching semantics for a path that had none.
 
 A quantity decrease changes the order's contribution to its level, so the level
 aggregate is reduced to match while the queue position is left alone.

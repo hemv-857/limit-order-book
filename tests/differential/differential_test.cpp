@@ -20,6 +20,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -98,6 +100,15 @@ class Differ {
   void run(std::int64_t ops) {
     for (std::int64_t i = 0; i < ops; ++i) {
       step();
+#ifndef NDEBUG
+      {
+        std::string_view why = "ok";
+        if (!engine_.check_invariants(&why)) {
+          report(i, std::string("engine invariant violated: ") + std::string(why));
+          return;
+        }
+      }
+#endif
       if (!compare(i)) {
         return;
       }
@@ -420,9 +431,7 @@ const std::vector<Scenario>& scenarios() {
 // This harness found the crossed-book defect recorded in docs/FINAL_REPORT.md
 // (the occupancy bitmap is shared across sides, so refreshing an extreme could
 // land on the opposite side) plus two L2 UpdateAction defects.
-// DISABLED: one divergence remains open. See the note above the comparison and
-// docs/FINAL_REPORT.md. Kept in the tree, still built, still runnable.
-TEST(Differential, DISABLED_EnginesAgree) {
+TEST(Differential, EnginesAgree) {
   // Defaults are sized so the suite stays usable in CI. The digest comparison
   // after every operation is O(book size), so cost grows with book size as well
   // as with op count; scale with LOB_DIFF_OPS for a long run.
@@ -442,11 +451,25 @@ TEST(Differential, DISABLED_EnginesAgree) {
               static_cast<long long>(per_scenario));
 }
 
-// DISABLED: sweeps 24 seeds and currently stalls on one of them, which is
-// itself worth chasing -- a stall where there should be progress usually means a
-// matching loop that is not advancing. Kept enabled-by-code so the sweep is
-// live as soon as the stall is understood.
-TEST(Differential, DISABLED_SeedsVary) {
+// Regression for a hang, not just a wrong answer. A replace that set the new
+// total quantity to exactly the already-filled quantity used to rest a
+// zero-quantity order; the matching loop then computed a zero fill against it,
+// made no progress, and spun forever -- an unbounded loop in the engine, i.e. a
+// hung venue. Pinned to the exact seed/scenario that found it.
+TEST(Differential, ReplacedToExactlyFilledQuantityDoesNotHangMatching) {
+  std::size_t i = 0;
+  for (const auto& sc : scenarios()) {
+    if (sc.name == "few_participants") {
+      break;
+    }
+    ++i;
+  }
+  Differ d(scenarios()[i], 0xA5A5'0000ULL + 2 * 977U + static_cast<unsigned>(i), SymbolId{0});
+  d.run(ops_from_env(150));
+  ASSERT_FALSE(d.diverged());
+}
+
+TEST(Differential, SeedsVary) {
   // One fixed seed can hide a divergence that only certain orderings reach, so
   // this sweeps many seeds over short runs rather than one long run. Scaled by
   // the same environment variable so CI stays quick.

@@ -1297,5 +1297,87 @@ TEST_F(EngineTest, EventSequenceNumbersAreStrictlyIncreasing) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Regressions found by the differential test (M2c)
+//
+// Both were found by comparing two independent engines, not by a test written
+// against the documented semantics.
+// ---------------------------------------------------------------------------
+
+/// Replace that sets the new *total* to exactly the already-filled quantity.
+/// Nothing remains to rest, so it is a cancel. It used to re-insert the order
+/// with leaves_qty == 0, which satisfies every structural check (its aggregate
+/// equals the sum over its orders, both zero) while no longer being tradeable --
+/// and a matching loop that reached it computed a zero fill, made no progress
+/// and spun forever.
+TEST_F(EngineTest, ReplaceToExactlyFilledQuantityCancels) {
+  Engine e = make_one();
+  e.submit(ord(OrderId{1}, Side::Sell, Price{100}, Quantity{10}, ParticipantId{1}));
+  // Partially fill it: 4 done, 6 still resting on the book.
+  e.submit(ord(OrderId{2}, Side::Buy, Price{100}, Quantity{4}, ParticipantId{2}));
+  e.clear_events();
+  ASSERT_EQ(e.book(kSym).top_of_book().best_ask_qty.value, 6);
+
+  // Replacing to a new *total* of exactly the filled quantity leaves zero
+  // remaining. It must cancel, not rest a zero-quantity order.
+  ReplaceRequest rr;
+  rr.seq = Sequence{++g_seq};
+  rr.ts = Timestamp{++g_ts};
+  rr.symbol = kSym;
+  rr.order_id = OrderId{1};
+  rr.participant = ParticipantId{1};
+  rr.new_quantity = Quantity{4};
+  e.submit(rr);
+
+  EXPECT_FALSE(e.book(kSym).top_of_book().has_ask)
+      << "a zero-quantity order was left resting on the book";
+  ExpectInvariants(e);
+}
+
+/// A price-changing replace never re-runs matching, so one that would land across
+/// the opposite touch used to rest there and leave the book CROSSED.
+TEST_F(EngineTest, PriceChangingReplaceThatWouldCrossIsRejected) {
+  Engine e = make_one();
+  e.submit(ord(OrderId{1}, Side::Buy, Price{100}, Quantity{5}, ParticipantId{1}));
+  e.submit(ord(OrderId{2}, Side::Sell, Price{104}, Quantity{5}, ParticipantId{2}));
+  e.clear_events();
+
+  // Move the offer from 104 to 103: still above the bid at 100, so it rests.
+  ReplaceRequest ok;
+  ok.seq = Sequence{++g_seq};
+  ok.ts = Timestamp{++g_ts};
+  ok.symbol = kSym;
+  ok.order_id = OrderId{2};
+  ok.participant = ParticipantId{2};
+  ok.new_price = Price{103};
+  ok.new_quantity = Quantity{5};
+  e.submit(ok);
+  ASSERT_EQ(count_of(e, EventType::Rejected), 0u);
+  EXPECT_EQ(e.book(kSym).top_of_book().best_ask.value, 103);
+  ExpectInvariants(e);
+
+  // Now move it to 101, which is at or below the resting bid: a replace never
+  // re-runs matching, so allowing it would rest the offer across the book.
+  e.clear_events();
+  ReplaceRequest bad;
+  bad.seq = Sequence{++g_seq};
+  bad.ts = Timestamp{++g_ts};
+  bad.symbol = kSym;
+  bad.order_id = OrderId{2};
+  bad.participant = ParticipantId{2};
+  bad.new_price = Price{100};
+  bad.new_quantity = Quantity{5};
+  e.submit(bad);
+
+  ASSERT_EQ(count_of(e, EventType::Rejected), 1u);
+  EXPECT_EQ(last(e).reject_code, RejectCode::ReplaceWouldCross);
+  // The book must be exactly as it was: bid 100 x5, ask 103 x5.
+  const TopOfBook tob = e.book(kSym).top_of_book();
+  EXPECT_EQ(tob.best_bid.value, 100);
+  EXPECT_EQ(tob.best_ask.value, 103);
+  EXPECT_FALSE(tob.crossed());
+  ExpectInvariants(e);
+}
+
 }  // namespace
 }  // namespace lob

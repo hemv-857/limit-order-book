@@ -131,9 +131,10 @@ enum class RejectCode : std::uint8_t {
   PriceOutOfRange = 22,                ///< outside the symbol's representable domain
   ReplaceWouldReduceBelowFilled = 23,  ///< replace below already-executed quantity
   ReplaceNoPriceChange = 24,           ///< replace that changes nothing
-  ShuttingDown = 25,                   ///< engine is draining; no new risk is accepted
-  InvalidField = 26,                   ///< malformed protocol field the decoder accepted
-  CancelExceedsLeaves = 27,            ///< cancel quantity above the resting quantity
+  ReplaceWouldCross = 25,              ///< price-changing replace that would cross the book
+  ShuttingDown = 26,                   ///< engine is draining; no new risk is accepted
+  InvalidField = 27,                   ///< malformed protocol field the decoder accepted
+  CancelExceedsLeaves = 28,            ///< cancel quantity above the resting quantity
 };
 
 [[nodiscard]] std::string_view to_string(RejectCode code) noexcept;

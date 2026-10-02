@@ -28,6 +28,21 @@ namespace {
   return Timestamp{static_cast<std::int64_t>(seq.value)};
 }
 
+/// Would an order at `side`/`price` rest across the opposite touch?
+///
+/// Only a price-changing replace can newly do this: a replace never re-runs
+/// matching, so moving an order to a price that crosses would rest it on the far
+/// side of the book and leave a crossed book behind. That is rejected rather
+/// than matched, which keeps replace deterministic and keeps the book uncrossed
+/// by construction.
+[[nodiscard]] bool rests_crossed(const Book& book, Side side, Price price) noexcept {
+  const TopOfBook tob = book.top_of_book();
+  if (side == Side::Buy) {
+    return tob.has_ask && price.value >= tob.best_ask.value;
+  }
+  return tob.has_bid && price.value <= tob.best_bid.value;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -733,8 +748,15 @@ void Engine::submit(const ReplaceRequest& request) noexcept {
     events_.push_back(e);
     return;
   }
-  if (request.new_quantity.value == 0) {
-    // Reduce-to-zero is a cancel, not a replace.
+  // Reduce-to-nothing is a cancel, not a replace. Note this is `<= filled`, not
+  // `== 0`: `new_quantity` is the order's new *total*, so an order already
+  // partly filled has filled quantity that can never be un-filled. Replacing to
+  // exactly the filled quantity leaves zero remaining, and re-inserting such an
+  // order puts a zero-quantity order in the book -- which then satisfies every
+  // structural check (its aggregate equals the sum over its orders, both zero)
+  // while no longer being tradeable. A matching loop that reaches it computes a
+  // zero fill and spins forever, so this case must cancel.
+  if (request.new_quantity.value <= o.filled_qty.value) {
     remove_order(*st, idx, CancelReason::ClientRequest, request.ts);
     return;
   }
@@ -745,6 +767,13 @@ void Engine::submit(const ReplaceRequest& request) noexcept {
     Event e = new_event(request.symbol, EventType::Rejected, request.ts);
     e.order_id = request.order_id;
     e.reject_code = RejectCode::PriceOutOfRange;
+    events_.push_back(e);
+    return;
+  }
+  if (price_changed && rests_crossed(st->book, o.side, target_price)) {
+    Event e = new_event(request.symbol, EventType::Rejected, request.ts);
+    e.order_id = request.order_id;
+    e.reject_code = RejectCode::ReplaceWouldCross;
     events_.push_back(e);
     return;
   }
@@ -830,8 +859,21 @@ void Engine::replace_stop_order(SymbolState& st, const ReplaceRequest& request) 
     events_.push_back(e);
     return;
   }
-  if (request.new_quantity.value == 0) {
+  // Same reasoning as the resting path: new_quantity is a new total, so anything
+  // at or below the already-filled quantity leaves nothing to rest.
+  if (request.new_quantity.value <= o.filled_qty.value) {
     remove_order(st, idx, CancelReason::ClientRequest, ts);
+    return;
+  }
+  // A pending stop's price is its trigger, so a price change relocates it in the
+  // stop book rather than the liquidity book. It must not end up immediately
+  // executable against the resting book.
+  if (request.new_price.value != 0 && request.new_price.value != o.price.value &&
+      rests_crossed(st.book, o.side, request.new_price)) {
+    Event e = new_event(request.symbol, EventType::Rejected, ts);
+    e.order_id = request.order_id;
+    e.reject_code = RejectCode::ReplaceWouldCross;
+    events_.push_back(e);
     return;
   }
   // A price change cannot apply to a pending stop: its price is its trigger.

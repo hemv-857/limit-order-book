@@ -100,6 +100,18 @@ bool Book::add_to_queue(OrderIndex idx) noexcept {
   if (order.level == kNullLevel || !in_domain(order.price)) {
     return false;
   }
+  // A zero-quantity order must never reach the book. It satisfies every
+  // structural check (its aggregate equals the sum over its orders, both zero)
+  // while no longer being tradeable, and a matching loop that reaches it computes
+  // a zero fill, makes no progress and spins forever. Caught here, at the point of
+  // insertion, rather than as a hang somewhere later.
+  assert(order.leaves_qty.value > 0 && "zero-quantity order queued");
+  // A zero-quantity order must never reach the book. It satisfies every
+  // structural check (its aggregate equals the sum over its orders, both zero)
+  // while no longer being tradeable, and a matching loop that reaches it computes
+  // a zero fill, makes no progress and spins forever. Caught here, at the point of
+  // insertion, rather than as a hang somewhere later.
+
   const LevelIndex li = order.level;
   Level& lv = levels_[li];
 

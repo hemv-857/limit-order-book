@@ -11,5 +11,5 @@ gtest_discover_tests(test_differential)
 # The long differential run is a separate test with a generous timeout.
 
 add_test(NAME differential_long COMMAND test_differential
-                                --gtest_filter=Differential.DISABLED_EnginesAgree)
+                                --gtest_filter=Differential.EnginesAgree)
 set_tests_properties(differential_long PROPERTIES TIMEOUT 1800)

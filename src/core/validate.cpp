@@ -199,6 +199,8 @@ std::string_view to_string(RejectCode code) noexcept {
       return "replace_below_filled";
     case RejectCode::ReplaceNoPriceChange:
       return "replace_no_price_change";
+    case RejectCode::ReplaceWouldCross:
+      return "replace_would_cross";
     case RejectCode::ShuttingDown:
       return "shutting_down";
     case RejectCode::InvalidField:
