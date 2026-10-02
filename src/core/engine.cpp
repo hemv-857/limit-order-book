@@ -160,7 +160,9 @@ void Engine::submit(const NewOrderRequest& request) noexcept {
     reject(*st, request, RejectCode::DuplicateOrderId);
     return;
   }
-  const RejectCode rc = validate_new_order(*st, request);
+  const RejectCode rc =
+      validate_new_order(SymbolRules{&st->config, st->has_last_trade, st->last_trade_price},
+                         request);
   if (rc != RejectCode::None) {
     reject(*st, request, rc);
     return;

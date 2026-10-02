@@ -17,8 +17,8 @@ namespace {
 
 }  // namespace
 
-RejectCode validate_new_order(const SymbolState& state, const NewOrderRequest& request) {
-  const SymbolConfig& cfg = state.config;
+RejectCode validate_new_order(const SymbolRules& rules, const NewOrderRequest& request) {
+  const SymbolConfig& cfg = *rules.config;
 
   // 1. quantity must be a positive multiple of the lot size, within limits.
   if (request.quantity.value <= 0) {
@@ -105,9 +105,9 @@ RejectCode validate_new_order(const SymbolState& state, const NewOrderRequest& r
     // it is not a stop: it would be triggerable on arrival. Checked against the
     // last trade price, and skipped when the symbol has never traded, since
     // there is then no reference to be wrong about.
-    if (state.has_last_trade) {
+    if (rules.has_last_trade) {
       const std::int64_t trigger = request.trigger_price.value;
-      const std::int64_t last = state.last_trade_price.value;
+      const std::int64_t last = rules.last_trade_price.value;
       if (request.side == Side::Buy && trigger <= last) {
         return RejectCode::InvalidStopDirection;
       }
