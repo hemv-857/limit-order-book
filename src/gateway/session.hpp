@@ -108,6 +108,10 @@ class Session {
   Session(std::uint64_t id, SessionConfig config, std::int64_t start_time)
       : id_(id), config_(config), deadline_(start_time + config.hello_timeout) {}
 
+  /// Only so Connection can be aggregate-initialised in tests and diagnostics.
+  /// A real session is always constructed with its own id, config and start time.
+  Session() = default;
+
   [[nodiscard]] std::uint64_t id() const noexcept {
     return id_;
   }

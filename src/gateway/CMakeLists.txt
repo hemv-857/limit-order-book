@@ -1,3 +1,4 @@
 add_library(lob_gateway STATIC market_data.cpp session.cpp)
 target_include_directories(lob_gateway PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(lob_gateway PUBLIC lob_protocol)
+target_sources(lob_gateway PRIVATE reactor.cpp)

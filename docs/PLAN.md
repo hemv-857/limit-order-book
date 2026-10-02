@@ -269,7 +269,29 @@ and its box ticked **here in this file**.
       own test code that had never been compiled with warnings on, and made a
       failure name the failing case instead of the binary.
 
-      **Not done:** the reactor (epoll + kqueue) and partial-write handling.
+      **Also done: reactor and partial-write handling** (`src/gateway/reactor.*`,
+      `write_queue.hpp`). epoll and kqueue behind one interface, chosen by the
+      preprocessor rather than at runtime — a venue should not discover at
+      startup that it picked the wrong backend. Level-triggered deliberately: a
+      missed edge then costs a syscall instead of a lost wakeup, and an
+      edge-triggered drain loop that cannot be interrupted is a well-known source
+      of stuck connections.
+      `WriteQueue` is the part built hardest, because corrupting a byte stream is
+      the easiest gateway bug to ship. The rule it makes unmissable: the caller
+      reports exactly how many bytes the kernel took, and `consume` removes
+      exactly that many. Over-reporting is clamped rather than trusted, since a
+      caller that claims more than it wrote would skip unsent bytes and
+      desynchronise the peer with no other symptom.
+      Exercised against a real socketpair with a deliberately small `SO_SNDBUF`,
+      so the kernel genuinely accepts the payload in pieces and the reassembled
+      stream is compared byte-for-byte.
+      Fixed while building: the reactor was constructing temporary `Connection`
+      objects to pass to its handler. The reactor does not own connection state,
+      so it now looks the live connection up through the handler instead — an
+      owner that can hand back a copied or dangling Connection is a bug the
+      reactor cannot defend against.
+      **M5 is complete.** Not wired together yet: there is no `main()` that
+      accepts a socket, runs the reactor and joins the shards. That is M6.
 - [ ] **M6 — Tools & e2e.** `venue`, `lobctl`, `loadgen`, `replay`, `bookviz`;
       end-to-end integration tests over real TCP.
 - [ ] **M7 — Fuzzing & sanitizers.** Fuzz targets for protocol decoder, journal
