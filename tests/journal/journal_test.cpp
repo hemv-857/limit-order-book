@@ -198,7 +198,7 @@ TEST(Journal, ReplayRebuildsAnIdenticalBook) {
 
   for (int i = 0; i < 4000; ++i) {
     ++seq;
-    const int w = which(rng);
+    const auto w = static_cast<int>(which(rng));
     if (w < 70 || log.empty()) {
       JournalRecord r = rec_new(seq, OrderId{seq}, side(rng) == 0 ? Side::Buy : Side::Sell,
                                 Price{px(rng)}, Quantity{qty(rng)});
@@ -208,7 +208,8 @@ TEST(Journal, ReplayRebuildsAnIdenticalBook) {
     } else if (w < 85) {
       JournalRecord r;
       r.kind = RecordKind::Cancel;
-      const auto& prev = log[static_cast<std::size_t>(seq % log.size())];
+      const auto& prev =
+          log[static_cast<std::size_t>(seq % static_cast<std::uint64_t>(log.size()))];
       r.cancel = CancelRequest{Sequence{seq}, Timestamp{static_cast<std::int64_t>(seq)},
                                SymbolId{0}, OrderId{static_cast<std::uint64_t>(seq % 4000)},
                                prev.new_order.participant};
@@ -253,6 +254,8 @@ TEST(Journal, ReplayRebuildsAnIdenticalBook) {
         break;
       case RecordKind::MassCancel:
         twin.submit(rec.mass_cancel);
+        break;
+      case RecordKind::Invalid:
         break;
     }
   }

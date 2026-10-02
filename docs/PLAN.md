@@ -241,8 +241,35 @@ and its box ticked **here in this file**.
       draining one subscriber into the reactor's reused write buffer handed the
       next subscriber that buffer's previous contents -- silently feeding one
       client another client's bytes.
-      **Not done:** session state machine, reactor (epoll + kqueue), and
-      heartbeat/timeout.
+      **Also done: session state machine** (`src/gateway/session.hpp`), with
+      heartbeat and timeout policy. Clock is injected, so every timeout is
+      exercised without sleeping. Two invariants are enforced in the state
+      machine rather than at the call sites that might forget:
+      - No order can be accepted before `Ready`. Every message is validated
+        against the current state and every refusal closes the session, so there
+        is no path reaching the engine unauthenticated.
+      - The participant id is the session's, never the client's. A request naming
+        a different participant is a *protocol error*, not something to quietly
+        rewrite: rewriting would hide an impersonation attempt behind a silently
+        accepted order.
+
+      Bugs found while building it:
+      - A session whose participant id is 0 accepted any claim, because the
+        check disjoined over all four request types' participant fields and the
+        three that did not apply were default-initialised to 0. Now only the
+        field belonging to the message type is checked.
+      - The constructor never set the initial hello deadline, and `on_tick` only
+        fires when a deadline is set — so a peer that connected and then said
+        nothing was **never timed out**. The deadline is now set at construction,
+        which is why the constructor takes the start time.
+
+      Also: the protocol, journal, runtime and gateway test targets now link
+      `lob_warnings` and register each case with `gtest_discover_tests`, like the
+      core tests already did. That immediately surfaced two latent warnings in my
+      own test code that had never been compiled with warnings on, and made a
+      failure name the failing case instead of the binary.
+
+      **Not done:** the reactor (epoll + kqueue) and partial-write handling.
 - [ ] **M6 — Tools & e2e.** `venue`, `lobctl`, `loadgen`, `replay`, `bookviz`;
       end-to-end integration tests over real TCP.
 - [ ] **M7 — Fuzzing & sanitizers.** Fuzz targets for protocol decoder, journal
