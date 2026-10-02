@@ -68,9 +68,14 @@ const Book& Engine::book(SymbolId symbol) const noexcept {
   return st != nullptr ? st->book : invalid_.book;
 }
 
-const Book& Engine::stop_book(SymbolId symbol) const noexcept {
+const Book& Engine::stop_buy_book(SymbolId symbol) const noexcept {
   const SymbolState* st = state(symbol);
-  return st != nullptr ? st->stops : invalid_.stops;
+  return st != nullptr ? st->stops_buy : invalid_.stops_buy;
+}
+
+const Book& Engine::stop_sell_book(SymbolId symbol) const noexcept {
+  const SymbolState* st = state(symbol);
+  return st != nullptr ? st->stops_sell : invalid_.stops_sell;
 }
 
 Book& Engine::mutable_book(SymbolId symbol) noexcept {
@@ -160,9 +165,8 @@ void Engine::submit(const NewOrderRequest& request) noexcept {
     reject(*st, request, RejectCode::DuplicateOrderId);
     return;
   }
-  const RejectCode rc =
-      validate_new_order(SymbolRules{&st->config, st->has_last_trade, st->last_trade_price},
-                         request);
+  const RejectCode rc = validate_new_order(
+      SymbolRules{&st->config, st->has_last_trade, st->last_trade_price}, request);
   if (rc != RejectCode::None) {
     reject(*st, request, rc);
     return;
@@ -196,7 +200,7 @@ void Engine::handle_new_order(SymbolState& st, NewOrderRequest request,
     }
     if (would_cross) {
       if (cfg.post_only_action == PostOnlyAction::Reject) {
-        reject(st, request, RejectCode::WouldCrossPostOnly);
+        fail_new(st, request, RejectCode::WouldCrossPostOnly, counts_as_acceptance);
         return;
       }
       if (request.side == Side::Buy ? !tob.has_ask : !tob.has_bid) {
@@ -209,7 +213,7 @@ void Engine::handle_new_order(SymbolState& st, NewOrderRequest request,
       const Price slid = request.side == Side::Buy ? Price{tob.best_ask.value - cfg.tick_size}
                                                    : Price{tob.best_bid.value + cfg.tick_size};
       if (!st.book.in_domain(slid)) {
-        reject(st, request, RejectCode::PriceOutOfRange);
+        fail_new(st, request, RejectCode::PriceOutOfRange, counts_as_acceptance);
         return;
       }
       request.price = slid;
@@ -230,14 +234,14 @@ void Engine::handle_new_order(SymbolState& st, NewOrderRequest request,
       available += st.book.level_at(lvl).aggregate_qty.value;
     }
     if (available < request.quantity.value) {
-      reject(st, request, RejectCode::FokInsufficientLiquidity);
+      fail_new(st, request, RejectCode::FokInsufficientLiquidity, counts_as_acceptance);
       return;
     }
   }
 
   const OrderIndex order_idx = st.arena.allocate();
   if (order_idx == kNullOrder) {
-    reject(st, request, RejectCode::BookFull);
+    fail_new(st, request, RejectCode::BookFull, counts_as_acceptance);
     return;
   }
   {
@@ -260,7 +264,7 @@ void Engine::handle_new_order(SymbolState& st, NewOrderRequest request,
   }
   if (!st.index.insert(request.order_id, order_idx, st.arena[order_idx].generation)) {
     st.arena.release(order_idx);
-    reject(st, request, RejectCode::BookFull);
+    fail_new(st, request, RejectCode::BookFull, counts_as_acceptance);
     return;
   }
 
@@ -292,15 +296,12 @@ void Engine::handle_new_order(SymbolState& st, NewOrderRequest request,
     // StopLimit will actually work at is held separately.
     o.stop_limit_price = request.price;
     o.price = request.trigger_price;
-    o.level = st.stops.index_of(request.trigger_price);
-    if (!st.stops.add_to_queue(order_idx)) {
+    Book& stop_book = request.side == Side::Buy ? st.stops_buy : st.stops_sell;
+    o.level = stop_book.index_of(request.trigger_price);
+    if (!stop_book.add_to_queue(order_idx)) {
       st.index.erase(request.order_id);
       st.arena.release(order_idx);
-      Event e = new_event(st.symbol_id, EventType::Rejected, request.ts);
-      e.order_id = request.order_id;
-      e.participant = request.participant;
-      e.reject_code = RejectCode::BookFull;
-      events_.push_back(e);
+      fail_new(st, request, RejectCode::BookFull, counts_as_acceptance);
     }
     return;
   }
@@ -402,7 +403,12 @@ void Engine::execute_fill(SymbolState& st, OrderIndex aggressor_idx, OrderIndex 
 
   maker.leaves_qty -= fill;
   maker.filled_qty += fill;
+  // The aggressor's filled quantity has to move too. It is the field that lets
+  // a later replace know how much may not be taken away, and leaving it at zero
+  // breaks filled + leaves == total for any order that partially fills and then
+  // rests.
   taker.leaves_qty -= fill;
+  taker.filled_qty += fill;
 
   st.trade_count += 1;
   // A fill removes the quantity from *two* orders -- the aggressor's and the
@@ -471,39 +477,34 @@ void Engine::collect_triggers(SymbolState& st, Price trade_price) noexcept {
   // Buy stops fire when the trade price reaches or exceeds the trigger: walk
   // trigger prices upward from the lowest, which also makes a cascade fire its
   // nearest trigger first and so stay reproducible.
-  for (LevelIndex lvl = st.stops.lowest_occupied(); lvl != kNullLevel;
-       lvl = st.stops.next_occupied_index(lvl)) {
-    if (st.stops.level_at(lvl).side != Side::Buy) {
-      continue;
-    }
-    if (st.stops.price_of(lvl).value > trade_price.value) {
+  for (LevelIndex lvl = st.stops_buy.lowest_occupied(); lvl != kNullLevel;
+       lvl = st.stops_buy.next_occupied_index(lvl)) {
+    if (st.stops_buy.price_of(lvl).value > trade_price.value) {
       break;
     }
-    dispatch_stop_level(st, lvl);
+    dispatch_stop_level(st, Side::Buy, lvl);
   }
   // Sell stops fire when the trade price reaches or falls below the trigger:
   // walk downward from the highest.
-  for (LevelIndex lvl = st.stops.highest_occupied(); lvl != kNullLevel;
-       lvl = st.stops.prev_occupied_index(lvl)) {
-    if (st.stops.level_at(lvl).side != Side::Sell) {
-      continue;
-    }
-    if (st.stops.price_of(lvl).value < trade_price.value) {
+  for (LevelIndex lvl = st.stops_sell.highest_occupied(); lvl != kNullLevel;
+       lvl = st.stops_sell.prev_occupied_index(lvl)) {
+    if (st.stops_sell.price_of(lvl).value < trade_price.value) {
       break;
     }
-    dispatch_stop_level(st, lvl);
+    dispatch_stop_level(st, Side::Sell, lvl);
   }
 }
 
-void Engine::dispatch_stop_level(SymbolState& st, LevelIndex lvl) noexcept {
+void Engine::dispatch_stop_level(SymbolState& st, Side side, LevelIndex lvl) noexcept {
+  Book& book = side == Side::Buy ? st.stops_buy : st.stops_sell;
   // Written as an explicit condition rather than `while (const OrderIndex i = head)`:
   // an index in a declaration is not a bool, and the implicit conversion is
   // exactly the kind of thing that silently inverts.
-  while (st.stops.level_at(lvl).head != kNullOrder) {
-    const OrderIndex idx = st.stops.level_at(lvl).head;
+  while (book.level_at(lvl).head != kNullOrder) {
+    const OrderIndex idx = book.level_at(lvl).head;
     // Copy before releasing: the slot belongs to the arena free list after this.
     const Order o = st.arena[idx];
-    st.stops.remove_from_queue(idx);
+    book.remove_from_queue(idx);
     st.index.erase(o.order_id);
     st.arena.release(idx);
 
@@ -821,19 +822,23 @@ void Engine::on_session_end(Timestamp now) noexcept {
 
     // Unfilled stops do not survive the session.
     std::size_t m = 0;
-    for (LevelIndex lvl = 0; lvl < st.stops.domain(); ++lvl) {
-      if (st.stops.level_at(lvl).empty()) {
-        continue;
-      }
-      for (OrderIndex cur = st.stops.level_at(lvl).head; cur != kNullOrder;
-           cur = st.arena[cur].next) {
-        st.scratch[m++] = cur;
+    for (const Side side : {Side::Buy, Side::Sell}) {
+      Book& book = side == Side::Buy ? st.stops_buy : st.stops_sell;
+      for (LevelIndex lvl = 0; lvl < book.domain(); ++lvl) {
+        if (book.level_at(lvl).empty()) {
+          continue;
+        }
+        for (OrderIndex cur = book.level_at(lvl).head; cur != kNullOrder;
+             cur = st.arena[cur].next) {
+          st.scratch[m++] = cur;
+        }
       }
     }
     for (std::size_t i = 0; i < m; ++i) {
       const Order o = st.arena[st.scratch[i]];
+      const bool is_buy = o.side == Side::Buy;
+      (is_buy ? st.stops_buy : st.stops_sell).remove_from_queue(st.scratch[i]);
       st.removed_qty += static_cast<std::uint64_t>(o.leaves_qty.value);
-      st.stops.remove_from_queue(st.scratch[i]);
       st.index.erase(o.order_id);
       st.arena.release(st.scratch[i]);
       Event e = new_event(st.symbol_id, EventType::Cancelled, now);
@@ -861,7 +866,8 @@ std::uint64_t Engine::state_hash() const noexcept {
   for (const std::unique_ptr<SymbolState>& up : states_) {
     const SymbolState& st = *up;
     mix(st.book.state_hash());
-    mix(st.stops.state_hash());
+    mix(st.stops_buy.state_hash());
+    mix(st.stops_sell.state_hash());
     mix(st.has_last_trade ? 1U : 0U);
     if (st.has_last_trade) {
       mix(static_cast<std::uint64_t>(st.last_trade_price.value));
@@ -883,14 +889,16 @@ bool Engine::check_invariants(std::string_view* error) const noexcept {
     if (!st.book.check_invariants(error)) {
       return false;
     }
-    if (!st.stops.check_invariants(error)) {
+    if (!st.stops_buy.check_invariants(error) || !st.stops_sell.check_invariants(error)) {
       return false;
     }
     // Conservation: every accepted lot is executed, removed or still resting.
     // This is the check that catches a level aggregate drifting out of step
     // with the orders it is supposed to summarise.
-    const std::uint64_t resting = static_cast<std::uint64_t>(st.book.total_resting_qty().value) +
-                                  static_cast<std::uint64_t>(st.stops.total_resting_qty().value);
+    const auto as_count = [](Quantity q) { return static_cast<std::uint64_t>(q.value); };
+    const std::uint64_t resting = as_count(st.book.total_resting_qty()) +
+                                  as_count(st.stops_buy.total_resting_qty()) +
+                                  as_count(st.stops_sell.total_resting_qty());
     if (st.accepted_qty != st.filled_qty + st.removed_qty + resting) {
       return fail("quantity conservation violated: accepted != filled + removed + resting");
     }

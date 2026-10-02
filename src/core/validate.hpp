@@ -43,6 +43,6 @@ struct SymbolRules {
 /// order so an order with several problems always reports the same one; the
 /// full order is documented in docs/MATCHING_RULES.md.
 [[nodiscard]] RejectCode validate_new_order(const SymbolRules& rules,
-                                           const NewOrderRequest& request);
+                                            const NewOrderRequest& request);
 
 }  // namespace lob

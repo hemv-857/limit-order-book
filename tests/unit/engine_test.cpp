@@ -686,7 +686,7 @@ TEST_F(EngineTest, StopOrderDoesNotOccupyLiquidityUntilTriggered) {
   e.submit(r);
   // Resting in the stop book only.
   EXPECT_EQ(e.book(kSym).top_of_book().empty(), true);
-  EXPECT_EQ(e.stop_book(kSym).top_of_book().best_bid.value, 110);
+  EXPECT_EQ(e.stop_buy_book(kSym).top_of_book().best_bid.value, 110);
   ExpectInvariants(e);
 }
 
@@ -705,7 +705,7 @@ TEST_F(EngineTest, BuyStopTriggersWhenPriceReachesTheTrigger) {
   // Having triggered, the stop became a market order and worked immediately:
   // it hit the resting sell it triggered on.
   EXPECT_GE(count_of(e, EventType::Trade), 1u);
-  EXPECT_TRUE(e.stop_book(kSym).top_of_book().empty());
+  EXPECT_TRUE(e.stop_buy_book(kSym).top_of_book().empty());
   ExpectInvariants(e);
 }
 
@@ -783,7 +783,7 @@ TEST_F(EngineTest, StopCascadeTriggersInPriceOrder) {
   EXPECT_EQ(triggered_ids[0], 10u);
   EXPECT_EQ(triggered_ids[1], 11u);
   // The 101 stop is untouched.
-  EXPECT_TRUE(e.stop_book(kSym).index_contains(OrderId{12}));
+  EXPECT_TRUE(e.stop_buy_book(kSym).index_contains(OrderId{12}));
   ExpectInvariants(e);
 }
 
@@ -1020,6 +1020,50 @@ TEST_F(EngineTest, StateHashDistinguishesDifferentOrderings) {
   EXPECT_NE(run(OrderId{1}, OrderId{2}), run(OrderId{2}, OrderId{1}));
 }
 
+TEST_F(EngineTest, AggressorThatRestsAfterPartialFillAccountsForFilledQuantity) {
+  // Regression: the aggressor's filled quantity was never incremented, so an
+  // order that partially filled and then rested reported filled == 0 with
+  // leaves < total. A later replace could then have been allowed to reduce the
+  // order below what had already traded.
+  Engine e = make_one();
+  e.submit(ord(OrderId{1}, Side::Sell, Price{100}, Quantity{4}, ParticipantId{2}));
+  e.submit(ord(OrderId{2}, Side::Sell, Price{101}, Quantity{10}, ParticipantId{2}));
+  e.clear_events();
+
+  // Buy 6 with a limit of 100: it fills the 4 available at 100 and then stops,
+  // because the next offer is at 101. The remaining 2 rests.
+  e.submit(ord(OrderId{3}, Side::Buy, Price{100}, Quantity{6}, ParticipantId{1}));
+
+  const TopOfBook tob = e.book(kSym).top_of_book();
+  ASSERT_TRUE(tob.has_bid);
+  EXPECT_EQ(tob.best_bid.value, 100);
+  EXPECT_EQ(tob.best_bid_qty.value, 2);
+  // The 101 level is untouched.
+  EXPECT_EQ(e.book(kSym).top_of_book().best_ask_qty.value, 10);
+
+  const OrderIndex resting = e.book(kSym).best_bid_order();
+  ASSERT_NE(resting, kNullOrder);
+  const Order& o = e.book(kSym)[resting];
+  EXPECT_EQ(o.order_id.value, 3u);
+  EXPECT_EQ(o.total_qty.value, 6);
+  EXPECT_EQ(o.filled_qty.value, 4);
+  EXPECT_EQ(o.leaves_qty.value, 2);
+  EXPECT_EQ(o.filled_qty.value + o.leaves_qty.value, o.total_qty.value);
+  ExpectInvariants(e);
+
+  // The filled quantity is what bounds a replace from shrinking below.
+  ReplaceRequest rr;
+  rr.seq = Sequence{++g_seq};
+  rr.ts = Timestamp{++g_ts};
+  rr.symbol = kSym;
+  rr.order_id = OrderId{3};
+  rr.participant = ParticipantId{1};
+  rr.new_quantity = Quantity{1};
+  e.clear_events();
+  e.submit(rr);
+  EXPECT_EQ(last(e).reject_code, RejectCode::ReplaceWouldReduceBelowFilled);
+}
+
 TEST_F(EngineTest, VolumeIsConservedAcrossManySymbols) {
   std::vector<SymbolConfig> cfgs{base_config("A"), base_config("B")};
   Engine e = make(std::move(cfgs));
@@ -1072,7 +1116,26 @@ TEST_F(EngineTest, StopOrdersAndLiquidityNeverShareAQueue) {
   e.submit(ord(OrderId{2}, Side::Sell, Price{100}, Quantity{10}, ParticipantId{2}));
   ExpectInvariants(e);
   EXPECT_EQ(e.book(kSym).top_of_book().best_ask.value, 100);
-  EXPECT_EQ(e.stop_book(kSym).top_of_book().best_ask.value, 200);
+  // A sell stop lives in the sell stop book, on its ask side.
+  EXPECT_EQ(e.stop_sell_book(kSym).top_of_book().best_ask.value, 200);
+  EXPECT_TRUE(e.stop_buy_book(kSym).top_of_book().empty());
+}
+
+TEST_F(EngineTest, BuyAndSellStopsCanShareATriggerPrice) {
+  // A price level holds exactly one side -- that invariant is what makes the
+  // liquidity book incapable of crossing -- so buy and sell stops have to live
+  // in separate books or the second one to arrive is rejected.
+  Engine e = make_one();
+  auto buy = ord(OrderId{1}, Side::Buy, Price{0}, Quantity{10}, ParticipantId{1}, OrderType::Stop);
+  buy.trigger_price = Price{150};
+  e.submit(buy);
+  auto sell =
+      ord(OrderId{2}, Side::Sell, Price{0}, Quantity{10}, ParticipantId{2}, OrderType::Stop);
+  sell.trigger_price = Price{150};
+  e.submit(sell);
+  ExpectInvariants(e);
+  EXPECT_EQ(e.stop_buy_book(kSym).top_of_book().best_bid_qty.value, 10);
+  EXPECT_EQ(e.stop_sell_book(kSym).top_of_book().best_ask_qty.value, 10);
 }
 
 TEST_F(EngineTest, EventSequenceNumbersAreStrictlyIncreasing) {

@@ -285,6 +285,34 @@ recording:
 12. **`trigger_queue.clear()` was left over** from a `push_back` design and wiped
     the pre-sized storage, so stop cascades aborted.
 
+### M2b — Randomised invariant probe (complete)
+
+`tests/property/invariant_probe.cpp` feeds a seeded, mixed operation stream
+(market/limit/stop/stop-limit, all four TIFs, icebergs, post-only, cancel,
+replace, mass cancel, session end) and re-checks every invariant every 1024
+operations. 20,000,000 operations clean.
+
+It immediately found two more defects that no hand-written case had reached:
+
+13. **The aggressor's `filled_qty` was never incremented.** `execute_fill`
+    decremented the taker's `leaves_qty` but only ever incremented the maker's
+    `filled_qty`. Any order that partially filled and then rested reported
+    `filled == 0` with `leaves < total`, which also meant a later replace could
+    be allowed to shrink the order below what had already traded. Regression
+    test: `AggressorThatRestsAfterPartialFillAccountsForFilledQuantity`.
+14. **A buy stop and a sell stop could not share a trigger price.** They lived in
+    one stop book, and a price level holds exactly one side by design — the
+    invariant that makes the liquidity book incapable of crossing. The second
+    stop to arrive was rejected after being accepted, leaking its quantity out
+    of the conservation law. Fixed by giving each symbol separate buy and sell
+    stop books, and regression test `BuyAndSellStopsCanShareATriggerPrice`.
+
+Bisecting the leak found a third, related: a triggered stop that converts into
+an order which no longer validates (a stop-limit whose limit price has since
+left the collar) was rejected without booking its quantity as removed, because it
+had already been counted as accepted when the stop was submitted. Rejections
+from the trigger queue now go through `fail_new`, which books the quantity.
+
 ---
 
 ## 8. Milestone log

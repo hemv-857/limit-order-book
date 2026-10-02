@@ -134,7 +134,11 @@ class EventBuffer {
 /// aggressor is matching), which is what keeps a single OrderId unambiguous.
 struct SymbolState {
   SymbolState(const SymbolConfig& cfg, std::uint32_t capacity)
-      : config(cfg), arena(capacity), book(cfg, arena, index), stops(cfg, arena, index) {
+      : config(cfg),
+        arena(capacity),
+        book(cfg, arena, index),
+        stops_buy(cfg, arena, index),
+        stops_sell(cfg, arena, index) {
     index.reset(capacity);
     // Mass cancel and session expiry collect victims before removing them
     // (removing while walking would disturb the walk), so they need scratch
@@ -153,8 +157,18 @@ struct SymbolState {
   SymbolConfig config{};
   OrderArena arena;
   OrderIndexTable index;
-  Book book;   ///< resting liquidity
-  Book stops;  ///< untriggered stop orders, keyed by trigger price
+  Book book;  ///< resting liquidity
+  /// Untriggered stop orders, keyed by trigger price.
+  ///
+  /// Two books rather than one: a buy stop and a sell stop can share a trigger
+  /// price, and a price level holds exactly one side by design (that invariant
+  /// is what makes the liquidity book incapable of crossing). One stop book
+  /// would therefore reject the second stop to arrive. Costs one extra grid per
+  /// symbol with stops enabled; symbols with stop_enabled == false allocate
+  /// neither, and a venue should size the stop domain to the price collar
+  /// rather than the full domain.
+  Book stops_buy;
+  Book stops_sell;
 
   bool has_last_trade{false};
   Price last_trade_price{};
@@ -246,7 +260,8 @@ class Engine {
   [[nodiscard]] bool check_invariants(std::string_view* error) const noexcept;
 
   [[nodiscard]] const Book& book(SymbolId symbol) const noexcept;
-  [[nodiscard]] const Book& stop_book(SymbolId symbol) const noexcept;
+  [[nodiscard]] const Book& stop_buy_book(SymbolId symbol) const noexcept;
+  [[nodiscard]] const Book& stop_sell_book(SymbolId symbol) const noexcept;
   [[nodiscard]] const SymbolState* symbol(SymbolId symbol) const noexcept;
 
   /// Mutable access for tests and for the snapshot writer.
@@ -268,6 +283,34 @@ class Engine {
   }
 
   void reject(SymbolState& st, const NewOrderRequest& r, RejectCode code) noexcept;
+
+  /// Reject a new order, booking its quantity when it arrived from the
+  /// stop-trigger queue.
+  ///
+  /// Such an order was already counted as accepted when the stop was submitted,
+  /// so a rejection here must also book the quantity as removed or the
+  /// conservation law leaks. A stop that triggers into an order which no longer
+  /// validates -- a stop-limit whose limit price is outside the collar, say -- is
+  /// rejected with a code rather than silently dropped.
+  void fail_new(SymbolState& st, const NewOrderRequest& r, RejectCode code,
+                bool counts_as_acceptance) noexcept {
+    if (!counts_as_acceptance) {
+      st.removed_qty += static_cast<std::uint64_t>(r.quantity.value);
+    }
+    reject(st, r, code);
+  }
+
+  /// Reject a new order that arrived from the stop-trigger queue.
+  ///
+  /// Such an order was already counted as accepted when the stop was submitted,
+  /// so a rejection here must also book its quantity as removed or the
+  /// conservation law leaks. A stop that triggers into an invalid order (a
+  /// stop-limit whose limit price is outside the collar, say) is rejected
+  /// rather than silently dropped, and the client sees the reject code.
+  void reject_triggered(SymbolState& st, const NewOrderRequest& r, RejectCode code) noexcept {
+    st.removed_qty += static_cast<std::uint64_t>(r.quantity.value);
+    reject(st, r, code);
+  }
 
   /// Full new-order path: post-only handling, FOK proof, accept, match, rest.
   /// Takes its argument by value because a slid post-only order has its price
@@ -297,7 +340,7 @@ class Engine {
 
   /// Queue any stops whose trigger the given trade price reached.
   void collect_triggers(SymbolState& st, Price trade_price) noexcept;
-  void dispatch_stop_level(SymbolState& st, LevelIndex lvl) noexcept;
+  void dispatch_stop_level(SymbolState& st, Side side, LevelIndex lvl) noexcept;
 
   void drain_trigger_queue(SymbolState& st) noexcept;
 
