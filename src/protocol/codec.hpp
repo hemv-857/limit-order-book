@@ -57,6 +57,12 @@ enum class MessageType : std::uint8_t {
   Subscribe = 7,
   Heartbeat = 8,
   Goodbye = 9,
+  // Server -> client only. A snapshot is the book as of one sequence; increments
+  // are the BookUpdate events after it. Sending a client a stream without a
+  // snapshot first, or an increment for a book it has never seen, produces a
+  // silently wrong book -- the worst failure a market data feed can have.
+  MarketDataSnapshot = 10,
+  MarketDataIncrement = 11,
 };
 
 [[nodiscard]] std::string_view to_string(MessageType type) noexcept;
@@ -77,8 +83,38 @@ enum class DecodeError : std::uint8_t {
 
 [[nodiscard]] std::string_view to_string(DecodeError error) noexcept;
 
-/// A decoded inbound message. One variant per request type, so the session
-/// machine dispatches with a single visit instead of a chain of ifs.
+/// A point-in-time view of one symbol's book, and the sequence it was taken at.
+///
+/// `sequence` is the whole point: it marks the exact boundary between this
+/// snapshot and the increments that follow it, which is what lets a subscriber
+/// prove it missed neither a change nor a duplicate.
+struct SnapshotPayload {
+  std::uint64_t sequence = 0;
+  SymbolId symbol{};
+  bool has_bid = false;
+  std::int64_t best_bid = 0;
+  std::int64_t best_bid_qty = 0;
+  std::uint32_t best_bid_orders = 0;
+  bool has_ask = false;
+  std::int64_t best_ask = 0;
+  std::int64_t best_ask_qty = 0;
+  std::uint32_t best_ask_orders = 0;
+};
+
+/// One level change, exactly as the engine emitted it. Echoing the engine's
+/// `UpdateAction` rather than re-deriving it keeps the feed consistent with the
+/// engine's own L2 stream.
+struct IncrementPayload {
+  std::uint64_t sequence = 0;
+  SymbolId symbol{};
+  Side side = Side::Buy;
+  UpdateAction action = UpdateAction::Added;
+  std::int64_t price = 0;
+  std::int64_t quantity = 0;
+};
+
+/// A decoded message. One variant per message type, so dispatch is a single
+/// visit instead of a chain of ifs.
 struct Inbound {
   MessageType type{MessageType::Hello};
   NewOrderRequest new_order{};
@@ -88,6 +124,8 @@ struct Inbound {
   SymbolId subscribe_symbol{};
   std::string session_id;         ///< Hello / Authenticate only
   std::string participant_token;  ///< Authenticate only
+  SnapshotPayload snapshot{};     ///< MarketDataSnapshot only
+  IncrementPayload increment{};   ///< MarketDataIncrement only
 };
 
 /// Encode a frame. Returns false if the payload would exceed kMaxPayload, in

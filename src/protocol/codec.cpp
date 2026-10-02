@@ -96,9 +96,12 @@ class Reader {
   bool ok_ = true;
 };
 
+/// True for a defined message type. Derived from the enum's own bounds rather
+/// than a hardcoded last value, so adding a type cannot silently make the
+/// decoder reject it.
 [[nodiscard]] bool known_type(std::uint8_t v) noexcept {
   return v >= static_cast<std::uint8_t>(MessageType::Hello) &&
-         v <= static_cast<std::uint8_t>(MessageType::Goodbye);
+         v <= static_cast<std::uint8_t>(MessageType::MarketDataIncrement);
 }
 
 }  // namespace
@@ -123,6 +126,10 @@ std::string_view to_string(MessageType type) noexcept {
       return "heartbeat";
     case MessageType::Goodbye:
       return "goodbye";
+    case MessageType::MarketDataSnapshot:
+      return "market_data_snapshot";
+    case MessageType::MarketDataIncrement:
+      return "market_data_increment";
   }
   return "unknown";
 }
@@ -213,6 +220,30 @@ std::vector<std::uint8_t> encode_payload(const Inbound& m) {
     case MessageType::Heartbeat:
     case MessageType::Goodbye:
       break;
+    case MessageType::MarketDataSnapshot: {
+      const auto& k = m.snapshot;
+      w.u64(k.sequence);
+      w.u32(k.symbol.value);
+      w.u8(k.has_bid ? 1U : 0U);
+      w.i64(k.best_bid);
+      w.i64(k.best_bid_qty);
+      w.u32(k.best_bid_orders);
+      w.u8(k.has_ask ? 1U : 0U);
+      w.i64(k.best_ask);
+      w.i64(k.best_ask_qty);
+      w.u32(k.best_ask_orders);
+      break;
+    }
+    case MessageType::MarketDataIncrement: {
+      const auto& k = m.increment;
+      w.u64(k.sequence);
+      w.u32(k.symbol.value);
+      w.u8(static_cast<std::uint8_t>(k.side));
+      w.u8(static_cast<std::uint8_t>(k.action));
+      w.i64(k.price);
+      w.i64(k.quantity);
+      break;
+    }
   }
   return w.payload();
 }
@@ -306,6 +337,30 @@ std::optional<Inbound> decode_payload(MessageType type, std::string_view payload
     case MessageType::Heartbeat:
     case MessageType::Goodbye:
       break;
+    case MessageType::MarketDataSnapshot: {
+      auto& k = m.snapshot;
+      k.sequence = r.u64();
+      k.symbol.value = r.u32();
+      k.has_bid = r.u8() != 0U;
+      k.best_bid = r.i64();
+      k.best_bid_qty = r.i64();
+      k.best_bid_orders = r.u32();
+      k.has_ask = r.u8() != 0U;
+      k.best_ask = r.i64();
+      k.best_ask_qty = r.i64();
+      k.best_ask_orders = r.u32();
+      break;
+    }
+    case MessageType::MarketDataIncrement: {
+      auto& k = m.increment;
+      k.sequence = r.u64();
+      k.symbol.value = r.u32();
+      k.side = static_cast<Side>(r.u8());
+      k.action = static_cast<UpdateAction>(r.u8());
+      k.price = r.i64();
+      k.quantity = r.i64();
+      break;
+    }
     default:
       error = DecodeError::UnknownType;
       return std::nullopt;

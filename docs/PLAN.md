@@ -220,9 +220,29 @@ and its box ticked **here in this file**.
       or read out of bounds (ASan/UBSan are what make that meaningful).
       `crc32c` moved to `src/util` so the journal and the wire share one
       implementation instead of two.
-      **Not done:** session state machine, reactor (epoll + kqueue), partial
-      write handling and the slow-consumer policy, heartbeat/timeout, and the
-      market data publisher with snapshot+increments.
+      **Also done: market data publisher** (`src/gateway/market_data.hpp`), with
+      the slow-consumer policy. The contract is the reason it is more than a loop
+      over events: a subscriber joining mid-stream must get a snapshot as of one
+      exact sequence and then every increment after it, with nothing before and
+      nothing twice. Getting that wrong does not crash and does not look wrong on
+      the wire -- the client just ends up with a subtly incorrect book. So the
+      boundary is explicit rather than emergent: each subscriber records the
+      highest sequence delivered per symbol, seeded at subscribe time, and an
+      increment is forwarded only when strictly greater. Verified end to end by
+      replaying a live engine's `BookUpdate` stream, decoding what the subscriber
+      actually received, reconstructing the book in a *different* data structure
+      and comparing it with the live book.
+      Slow-consumer policy: bounded outboxes, and a subscriber over its cap is
+      disconnected rather than skipped. Dropping updates would leave a client
+      holding a book it believes is current and is not. There is deliberately no
+      drop-oldest or drop-newest option -- for an order book every one of those
+      silently corrupts state.
+      Found and fixed while building: `take()` swapped instead of moving, so
+      draining one subscriber into the reactor's reused write buffer handed the
+      next subscriber that buffer's previous contents -- silently feeding one
+      client another client's bytes.
+      **Not done:** session state machine, reactor (epoll + kqueue), and
+      heartbeat/timeout.
 - [ ] **M6 — Tools & e2e.** `venue`, `lobctl`, `loadgen`, `replay`, `bookviz`;
       end-to-end integration tests over real TCP.
 - [ ] **M7 — Fuzzing & sanitizers.** Fuzz targets for protocol decoder, journal
