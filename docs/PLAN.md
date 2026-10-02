@@ -180,8 +180,13 @@ and its box ticked **here in this file**.
       **unverified**: equivalent unit tests pass with it reverted, so it is not
       claimed as the cause. Tests are `DISABLED_` with the open state documented,
       not silently dropped.
-- [ ] **M3 — Journal & recovery.** WAL framing with CRC32C, segment rotation,
-      fsync policy, snapshots, replay, torn-tail handling, state-hash equality.
+- [~] **M3 — Journal & recovery.** WAL framing with CRC32C, request codec,
+      replay into a live engine, torn-tail and corruption handling, and
+      state-hash equality after replay — **done and tested**
+      (`src/journal`, `tests/journal`).
+      **Not done:** segment rotation, fsync policy, and snapshots. Recovery today
+      replays the whole log from genesis, which is O(journal) and fine for a
+      correctness baseline but not for a restart SLA.
 - [ ] **M4 — Engine runtime.** SPSC rings (documented memory ordering), sequencer,
       sharded single-threaded engines, pinning, backoff, graceful drain, TSan.
 - [ ] **M5 — Gateway & protocol.** Wire codec, framing, session state machine,
