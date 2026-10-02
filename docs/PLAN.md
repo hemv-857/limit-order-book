@@ -162,9 +162,16 @@ and its box ticked **here in this file**.
       configs, local tool bootstrap script, `.gitignore`, license.
 - [x] **M1 — Core types + order book.** Strong types, arena, hash index, grid,
       FIFO levels, cancel, state hash, unit tests, zero-allocation test.
-- [ ] **M2 — Full semantics.** Order types, TIFs, post-only, iceberg, stops,
-      replace, mass cancel, STP, pre-trade risk + reject codes; naive reference
-      engine; differential test (≥10 M ops) and property/invariant tests.
+- [x] **M2a — Full semantics.** Order types, TIFs, post-only, iceberg, stops,
+      replace, mass cancel, STP, pre-trade risk + reject codes.
+- [x] **M2b — Randomised invariant probe.** Seeded mixed operation stream with
+      every invariant re-checked periodically; 20 M ops clean.
+- [ ] **M2c — Reference engine + differential test.** Naive `std::map` +
+      `std::deque` engine compared event-for-event over ≥ 10 M randomized ops.
+      **Not done.** An earlier attempt was abandoned rather than shipped
+      half-correct. `validate_new_order` was refactored to take a `SymbolRules`
+      POD so the reference can share the reject ladder without depending on the
+      production book layout.
 - [ ] **M3 — Journal & recovery.** WAL framing with CRC32C, segment rotation,
       fsync policy, snapshots, replay, torn-tail handling, state-hash equality.
 - [ ] **M4 — Engine runtime.** SPSC rings (documented memory ordering), sequencer,
