@@ -292,46 +292,42 @@ and its box ticked **here in this file**.
       reactor cannot defend against.
       **M5 is complete.** Not wired together yet: there is no `main()` that
       accepts a socket, runs the reactor and joins the shards. That is M6.
-- [~] **M6 — Tools & e2e. Started, not finished.**
-      **Done and verified:** shard workers now publish their events back to the
-      owner thread through per-shard SPSC rings instead of the owner reading a
-      shard's engine directly, with ring overflow surfaced as a fault rather than
-      silently dropped. Added `SubscribeRequest` / `ShardSnapshot` so a book
-      snapshot is taken **on the thread that owns the book** -- a gateway reading
-      a shard's book would race its worker. `MarketDataPublisher::subscribe` now
-      takes a `SnapshotPayload` rather than a `Book`, so the API no longer invites
-      an off-thread read.
-
-      **Two real bugs found and fixed:**
-      - An idle shard worker burned 100% of a core in a `yield` loop. Measured at
-        198% CPU with two shards, which starved the very threads they were waiting
-        for. Now spins briefly and then sleeps; the spin counter resets on every
-        successful pop so a busy shard never sleeps.
-      - `Reactor::running_` was a plain `bool` written by `stop()` on one thread
-        and read by the poll loop on another. A data race, so the loop could hoist
-        the read and spin forever on an already-changed value. Now atomic.
-
-      **Not finished, and deliberately not committed.** A `Venue` that wires the
-      codec, session machine, shards, publisher and reactor together was written,
-      along with eight end-to-end tests over real TCP. It did not work: the venue
-      thread would not exit, so every test hung in the fixture's `join()`. Three
-      integration bugs were found and fixed on the way there --
-      - nothing fed the reactor's accumulated `inbox` into the connection's
-        `FrameReader`, so bytes arrived and were never decoded;
-      - `Venue::run()` ignored the stop flag entirely;
-      - market data was appended to a connection's outbox but never flushed, so a
-        subscriber would never have seen it.
-        -- but the shutdown hang was not resolved before the work ran out, and
-      shipping a hanging server plus a red suite is worse than shipping neither.
-      `src/venue` and `tests/e2e` are therefore **not** in the tree. The next
-      attempt should start by making shutdown provable: have `Venue::run()` own an
-      explicit, tested exit condition and assert the thread joins, before building
-      anything else on top.
-
-      Still to do: `venue`, `lobctl`, `loadgen`, `replay`, `bookviz`.
-      `loadgen` belongs with M8 (it is the benchmark harness) and `bookviz` is
-      speculative -- a visualisation of a book the JSON/book-dump path can already
-      produce.
+- [~] **M6 — Tools & e2e. The venue runs; one market data path still hangs.**
+      **Done:** `src/venue` wires codec, session machine, sharded engine, market
+      data publisher and reactor into one process, and `tests/e2e` drives it over
+      real TCP — 10 tests covering handshake, order flow, two clients trading,
+      unauthenticated refusal, garbage isolation, two symbols on two shards, a
+      1,200-order concurrent load leaving the book uncrossed, and three shutdown
+      tests.
+      **Shutdown was written first and tested first**, which is the lesson from the
+      previous attempt: a property the whole program depends on should be proven
+      before anything is layered on it. That immediately paid for itself — four
+      real bugs, all of which had hung every single test:
+      - `listen_on` never set `O_NONBLOCK` on the listener, so `accept_ready()`'s
+        second `::accept()` blocked forever waiting for a connection that may never
+        arrive. The acceptor loop could not be stopped, let alone joined.
+      - `ShardedEngineHost`'s per-shard snapshot rings were never resized or
+        populated in the constructor, so `take_snapshots()` indexed an empty
+        vector. Out-of-bounds reads that present as a hang, not a crash.
+      - `VenueStats` counters were plain `uint64_t` written by the acceptor thread
+        and read by anything watching. Now atomic.
+      - `ShardedEngineHost::top_of_book()` read a shard's book directly from the
+        caller's thread — the exact race the whole shard design exists to prevent,
+        exposed by an API that invited it. **Removed**, not patched: reads now go
+        through the owning shard via the snapshot ring, and `Venue::top_of_book()`
+        returns the last answer that arrived under a lock.
+      TSan found the last two, which is the argument for running the e2e suite
+      under it rather than excluding sockets from the sanitized build.
+      **One test is DISABLED and the reason is specific:** `pump_market_data` does
+      not complete, so a subscriber never receives its feed. The publisher itself
+      is covered by 13 unit tests including a full snapshot-then-increments
+      reconstruction against a live engine, so the feed *logic* is sound; what is
+      unwired is the venue's path from the publisher's outbox to the subscriber's
+      socket. A venue that cannot stream market data is only half a venue, so this
+      is the next thing to fix.
+      Still to do: `lobctl`, `loadgen`, `replay`. `loadgen` belongs with M8 (it is
+      the benchmark harness) and `bookviz` is speculative — a visualisation of a
+      book the existing dump path already produces.
 - [ ] **M7 — Fuzzing & sanitizers.** Fuzz targets for protocol decoder, journal
       reader, engine input; committed corpus; ASan/UBSan/TSan clean on the suite.
 - [ ] **M8 — Performance.** Google Benchmark suite, profiling, hotspot fixes,

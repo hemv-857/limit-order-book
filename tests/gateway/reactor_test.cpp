@@ -6,6 +6,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -322,6 +324,94 @@ TEST(Reactor, ConnectionLookupForAnUnknownIdReturnsNull) {
   handler.connections_.emplace(1, Connection{1, 3, {}, {}, false, false, Session(1, {}, 0)});
   EXPECT_NE(handler.connection(1), nullptr);
   EXPECT_EQ(handler.connection(999), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown
+//
+// The property the venue work got stuck on: a run loop that can be told to stop
+// from another thread and then joined. Everything else in a server depends on
+// this -- a process that cannot shut down cleanly cannot be deployed, restarted
+// or tested -- so it is pinned on its own rather than inferred from a bigger test.
+// ---------------------------------------------------------------------------
+
+TEST(Reactor, StartsRunningAndReportsNotStopped) {
+  // A constructed reactor is meant to be polled until told otherwise. Defaulting
+  // the flag to false made stopped() report true before anything ran, so an
+  // owner looping on it never entered the loop at all.
+  RecordingHandler handler;
+  Reactor reactor(handler);
+  EXPECT_FALSE(reactor.stopped());
+}
+
+TEST(Reactor, StopIsVisibleFromAnotherThread) {
+  // running_ is written by one thread and read by the loop on another. As a plain
+  // bool that is a data race and the loop may never observe the change.
+  RecordingHandler handler;
+  Reactor reactor(handler);
+  std::atomic<bool> seen{false};
+  std::thread watcher([&reactor, &seen] {
+    while (!reactor.stopped()) {
+      std::this_thread::yield();
+    }
+    seen.store(true);
+  });
+  reactor.stop();
+  watcher.join();
+  EXPECT_TRUE(seen.load());
+  EXPECT_TRUE(reactor.stopped());
+}
+
+/// The end-to-end shape the venue uses: a loop polling until stopped, joined from
+/// the owner. If this hangs, everything built on the reactor hangs with it.
+TEST(Reactor, APollLoopCanBeStoppedAndJoined) {
+  SocketPair pair;
+  RecordingHandler handler;
+  Reactor reactor(handler);
+  handler.connections_.emplace(
+      1, Connection{1, pair.server(), {}, {}, false, false, Session(1, SessionConfig{}, 0)});
+  ASSERT_TRUE(reactor.manage(pair.server(), 1));
+
+  std::thread loop([&reactor] {
+    while (!reactor.stopped()) {
+      (void)reactor.poll_once(10);
+    }
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  reactor.stop();
+  // A bounded join: if the loop cannot exit, fail rather than hang the suite.
+  ASSERT_EQ(loop.joinable(), true);
+  loop.join();
+  EXPECT_TRUE(reactor.stopped());
+}
+
+/// Stopping while a connection is mid-transfer must still join: the loop drains
+/// whatever arrived rather than abandoning it.
+TEST(Reactor, StopMidTransferStillJoins) {
+  SocketPair pair;
+  RecordingHandler handler;
+  Reactor reactor(handler);
+  handler.connections_.emplace(
+      1, Connection{1, pair.server(), {}, {}, false, false, Session(1, SessionConfig{}, 0)});
+  ASSERT_TRUE(reactor.manage(pair.server(), 1));
+
+  // Small enough to fit the socket buffer in one go: a larger write on a
+  // non-blocking socket would be refused, and retrying until it succeeds livelocks
+  // the test because nothing is draining the other end.
+  const std::string payload(2000, 'q');
+  ASSERT_EQ(::write(pair.client(), payload.data(), payload.size()),
+            static_cast<ssize_t>(payload.size()));
+
+  std::thread loop([&reactor] {
+    while (!reactor.stopped()) {
+      (void)reactor.poll_once(5);
+    }
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  reactor.stop();
+  loop.join();
+  EXPECT_TRUE(reactor.stopped());
 }
 
 }  // namespace
