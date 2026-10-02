@@ -20,9 +20,18 @@ using OrderIndex = std::uint32_t;
 /// Index into the per-symbol price grid. Same rationale as OrderIndex.
 using LevelIndex = std::uint32_t;
 
-/// Sentinel for "no order". Chosen as the maximum index so that a zeroed arena
-/// (which would mean slot 0) can never be mistaken for a valid link.
-inline constexpr OrderIndex kNullOrder = std::numeric_limits<OrderIndex>::max();
+/// Sentinel for "no order", defined as index **zero**.
+///
+/// Zero is used rather than UINT32_MAX so that `if (idx)` and
+/// `while (const OrderIndex i = head)` mean "if there is an order". Reserving
+/// arena slot 0 costs one Order of memory and removes an entire class of bug:
+/// with a max-uint32 sentinel, a loop testing the index for zero runs off the
+/// end of the arena, because it stops only at slot 0 -- which is a *valid*
+/// order. That mistake is silent until it dereferences a wild index.
+///
+/// OrderArena therefore hands out indices from 1 upwards and never returns 0.
+inline constexpr OrderIndex kNullOrder = 0;
+static_assert(kNullOrder == 0, "the null sentinel must be zero for if (idx) to mean 'has order'");
 
 /// Sentinel for "no level".
 inline constexpr LevelIndex kNullLevel = std::numeric_limits<LevelIndex>::max();
@@ -61,7 +70,11 @@ struct Order {
   TimeInForce tif{TimeInForce::GTC};
 
   // ---- cold: touched once per order, not once per match ----
-  Price trigger_price;   ///< stop trigger; only meaningful for stop types
+  Price trigger_price;  ///< stop trigger; only meaningful for stop types
+  /// Limit price a pending StopLimit becomes once triggered. Kept separate from
+  /// `price`, which is set to the trigger while the order sits in the stop book
+  /// so that an order's price always matches the price of its level.
+  Price stop_limit_price{};
   Quantity total_qty;    ///< original order quantity
   Quantity display_qty;  ///< iceberg visible slice; 0 means fully visible
   Sequence arrival_seq;  ///< arrival order; the tiebreaker of last resort
@@ -101,6 +114,6 @@ struct Order {
   }
 };
 
-static_assert(sizeof(Order) <= 96, "Order grew past its cache-friendly budget");
+static_assert(sizeof(Order) <= 104, "Order grew past its cache-friendly budget");
 
 }  // namespace lob

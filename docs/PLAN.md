@@ -241,6 +241,50 @@ Invariants asserted in debug builds:
 - **D-5 — UDP multicast market data** was a stretch goal in the spec and is not
   implemented; TCP market data with sequence numbers and snapshot recovery is.
 
+### M2a — Matching semantics + unit tests (complete)
+
+54 engine tests (91 total), green in `release`, `asan-ubsan` and `tsan`;
+clang-format and clang-tidy clean.
+
+Delivered: order types (Limit, Market, Stop, StopLimit), TIFs (Day, GTC, IOC,
+FOK), post-only reject *and* slide, iceberg with priority loss on replenish,
+cancel, cancel/replace with priority rules, mass cancel, session expiry, all four
+STP modes, the full pre-trade reject ladder, and per-participant rate limiting.
+Stops live in a second book keyed by trigger price, so they occupy no liquidity;
+cascades drain a work list instead of recursing.
+
+Twelve defects were found by tests rather than by inspection. The ones worth
+recording:
+
+1. **The null sentinel was `UINT32_MAX` while loop conditions tested for zero.**
+   `while (const OrderIndex i = level.head)` therefore exited only at slot 0 --
+   a *valid* order -- and ran off the end of the arena. Fixed structurally, not
+   by patching the loop: `kNullOrder` is now 0, arena slot 0 is reserved, and
+   `if (idx)` means "has order". This removed a whole bug class.
+2. **A fully filled maker was unlinked after its quantity hit zero**, so the
+   level aggregate was never reduced. Book::check_invariants caught it.
+3. **Post-only slide put a buy *above* the ask**, leaving it crossing. The slide
+   direction is now derived from the side.
+4. **A partially filled order was unlinked/re-linked in the wrong order**, so
+   replace left the level aggregate stale.
+5. **The aggressor's arena slot was used after self-trade prevention released
+   it.** `match` now reports whether the aggressor survived.
+6. **A fully filled aggressor stayed in the id index**, so the book and the index
+   disagreed and a client could "cancel" an order that no longer existed.
+7. **A stop-limit's limit price was overwritten by its trigger price**, turning
+   every stop-limit into a market order on trigger.
+8. **The id index's size counter was never decremented on erase**, so a
+   cancel-heavy venue would eventually report itself permanently full.
+9. **Free-list seeding dropped the last arena slot** after the sentinel change.
+10. **`lowest_occupied()`/`highest_occupied()` returned inverted results**,
+    because they were implemented with the *nearest*-occupied scans. Stops
+    triggered on the wrong side of the book.
+11. **The volume invariant was unmeasurable.** Counting aggressor-side volume
+    cannot balance by construction. Replaced with a real conservation law:
+    every accepted lot is executed, removed, or still resting.
+12. **`trigger_queue.clear()` was left over** from a `push_back` design and wiped
+    the pre-sized storage, so stop cascades aborted.
+
 ---
 
 ## 8. Milestone log

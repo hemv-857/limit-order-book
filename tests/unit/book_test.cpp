@@ -1,5 +1,7 @@
 #include "core/book.hpp"
 
+#include "book_fixture.hpp"
+
 #include <gtest/gtest.h>
 
 #include <string>
@@ -60,14 +62,15 @@ bool cancel_order(Book& book, OrderId id) {
 
 class BookTest : public ::testing::Test {
  protected:
-  BookTest() : book_(test_config()) {}
+  BookTest() : fixture_(test_config()), book_(fixture_.book) {}
 
   void ExpectInvariants() {
     std::string_view why;
     ASSERT_TRUE(book_.check_invariants(&why)) << "invariant violated: " << why;
   }
 
-  Book book_;
+  testing::BookFixture fixture_;
+  Book& book_;
 };
 
 // ---------------------------------------------------------------------------
@@ -283,17 +286,20 @@ TEST_F(BookTest, BookIsNeverCrossed) {
 // ---------------------------------------------------------------------------
 
 TEST_F(BookTest, ArenaExhaustionIsReportedNotGrown) {
-  OrderArena arena(3);
-  EXPECT_EQ(arena.allocate(), OrderIndex{0});
+  // Slot 0 is the reserved null sentinel, so usable slots are 1..capacity.
+  OrderArena arena(4);
+  EXPECT_EQ(arena.capacity(), 4u);
   EXPECT_EQ(arena.allocate(), OrderIndex{1});
   EXPECT_EQ(arena.allocate(), OrderIndex{2});
+  EXPECT_EQ(arena.allocate(), OrderIndex{3});
+  EXPECT_EQ(arena.allocate(), OrderIndex{4});
   EXPECT_EQ(arena.free_count(), 0u);
   // Full: must return the sentinel rather than allocate.
   EXPECT_EQ(arena.allocate(), kNullOrder);
-  EXPECT_EQ(arena.live_count(), 3u);
+  EXPECT_EQ(arena.live_count(), 4u);
 
-  arena.release(1);
-  EXPECT_EQ(arena.allocate(), OrderIndex{1});
+  arena.release(2);
+  EXPECT_EQ(arena.allocate(), OrderIndex{2});
   EXPECT_EQ(arena.free_count(), 0u);
 }
 
@@ -399,8 +405,10 @@ TEST_F(BookTest, GenerationGuardsAgainstStaleHandles) {
 // ---------------------------------------------------------------------------
 
 TEST_F(BookTest, StateHashIsStableForIdenticalState) {
-  Book a(test_config());
-  Book b(test_config());
+  testing::BookFixture fa(test_config());
+  testing::BookFixture fb(test_config());
+  Book& a = fa.book;
+  Book& b = fb.book;
   for (int i = 0; i < 50; ++i) {
     const auto id = OrderId{static_cast<std::uint64_t>(i) + 1};
     // Bids below, asks above: a level may only ever hold one side.
@@ -415,8 +423,10 @@ TEST_F(BookTest, StateHashIsStableForIdenticalState) {
 }
 
 TEST_F(BookTest, StateHashIsSensitiveToPriorityOrder) {
-  Book a(test_config());
-  Book b(test_config());
+  testing::BookFixture fa(test_config());
+  testing::BookFixture fb(test_config());
+  Book& a = fa.book;
+  Book& b = fb.book;
   insert_order(a, OrderId{1}, Side::Buy, Price{100}, Quantity{10}, Sequence{1});
   insert_order(a, OrderId{2}, Side::Buy, Price{100}, Quantity{10}, Sequence{2});
   insert_order(b, OrderId{2}, Side::Buy, Price{100}, Quantity{10}, Sequence{2});
@@ -434,14 +444,17 @@ TEST_F(BookTest, StateHashChangesWhenQuantityChanges) {
 }
 
 TEST_F(BookTest, EmptyBookHasStableNonTrivialHash) {
-  Book a(test_config());
-  Book b(test_config());
+  testing::BookFixture fa(test_config());
+  testing::BookFixture fb(test_config());
+  Book& a = fa.book;
+  Book& b = fb.book;
   EXPECT_EQ(a.state_hash(), b.state_hash());
   // Different configuration must not hash the same, or a replay across configs
   // would compare equal while being semantically different.
   SymbolConfig other = test_config();
   other.tick_size = 5;
-  Book c(other);
+  testing::BookFixture fc(other);
+  const Book& c = fc.book;
   EXPECT_NE(a.state_hash(), c.state_hash());
 }
 

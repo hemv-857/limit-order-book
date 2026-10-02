@@ -30,7 +30,7 @@ inline std::uint64_t bits_from(unsigned bit) noexcept {
 
 }  // namespace
 
-Book::Book(const SymbolConfig& cfg)
+Book::Book(const SymbolConfig& cfg, OrderArena& arena, OrderIndexTable& index)
     : cfg_(cfg),
       min_price_(cfg.min_price),
       max_price_(cfg.max_price),
@@ -38,9 +38,8 @@ Book::Book(const SymbolConfig& cfg)
       bitmap_words_((static_cast<std::size_t>(domain_) + 63U) / 64U),
       levels_(domain_),
       occupied_(bitmap_words_, 0),
-      arena_(cfg.max_open_orders) {
-  index_.reset(cfg.max_open_orders);
-}
+      arena_(&arena),
+      index_(&index) {}
 
 void Book::set_occupied(LevelIndex idx, bool occupied) noexcept {
   const std::size_t word = idx / 64U;
@@ -72,6 +71,9 @@ LevelIndex Book::prev_occupied(std::size_t idx) const noexcept {
 }
 
 LevelIndex Book::next_occupied(std::size_t idx) const noexcept {
+  if (idx >= domain_) {
+    return kNullLevel;
+  }
   const std::size_t start = idx + 1U;
   if (start >= domain_) {
     return kNullLevel;
@@ -90,23 +92,11 @@ LevelIndex Book::next_occupied(std::size_t idx) const noexcept {
   }
 }
 
-void Book::refresh_best_bid() noexcept {
-  best_bid_ =
-      prev_occupied(static_cast<std::size_t>(best_bid_ == kNullLevel ? domain_ : best_bid_));
-  if (best_bid_ == kNullLevel) {
-    best_bid_ = kNullLevel;
-  }
-}
-
-void Book::refresh_best_ask() noexcept {
-  best_ask_ = next_occupied(static_cast<std::size_t>(best_ask_ == kNullLevel ? 0 : best_ask_));
-}
-
 bool Book::add_to_queue(OrderIndex idx) noexcept {
   if (idx == kNullOrder) {
     return false;
   }
-  Order& order = arena_[idx];
+  Order& order = (*arena_)[idx];
   if (order.level == kNullLevel || !in_domain(order.price)) {
     return false;
   }
@@ -137,7 +127,7 @@ bool Book::add_to_queue(OrderIndex idx) noexcept {
     if (lv.side != order.side) {
       return false;
     }
-    arena_[lv.tail].next = idx;
+    (*arena_)[lv.tail].next = idx;
     order.prev = lv.tail;
   }
 
@@ -154,7 +144,7 @@ void Book::remove_from_queue(OrderIndex idx) noexcept {
   if (idx == kNullOrder) {
     return;
   }
-  Order& order = arena_[idx];
+  Order& order = (*arena_)[idx];
   const LevelIndex li = order.level;
   if (li == kNullLevel) {
     return;
@@ -162,12 +152,12 @@ void Book::remove_from_queue(OrderIndex idx) noexcept {
   Level& lv = levels_[li];
 
   if (order.prev != kNullOrder) {
-    arena_[order.prev].next = order.next;
+    (*arena_)[order.prev].next = order.next;
   } else {
     lv.head = order.next;
   }
   if (order.next != kNullOrder) {
-    arena_[order.next].prev = order.prev;
+    (*arena_)[order.next].prev = order.prev;
   } else {
     lv.tail = order.prev;
   }
@@ -192,13 +182,18 @@ void Book::remove_from_queue(OrderIndex idx) noexcept {
   }
 }
 
+void Book::reduce_level(LevelIndex idx, Quantity qty) noexcept {
+  levels_[idx].aggregate_qty -= qty;
+  total_qty_ -= qty;
+}
+
 void Book::move_to_back_of_level(OrderIndex idx, LevelIndex new_level) noexcept {
   if (idx == kNullOrder || new_level >= domain_) {
     return;
   }
   remove_from_queue(idx);
-  arena_[idx].price = price_of(new_level);
-  arena_[idx].level = new_level;
+  (*arena_)[idx].price = price_of(new_level);
+  (*arena_)[idx].level = new_level;
   add_to_queue(idx);
 }
 
@@ -243,8 +238,8 @@ std::uint64_t Book::state_hash() const noexcept {
 
     // Walk the queue in priority order: the digest must depend on who is in
     // front, not merely on who exists.
-    for (OrderIndex cur = lv.head; cur != kNullOrder; cur = arena_[cur].next) {
-      const Order& o = arena_[cur];
+    for (OrderIndex cur = lv.head; cur != kNullOrder; cur = (*arena_)[cur].next) {
+      const Order& o = (*arena_)[cur];
       hash_mix(h, o.order_id.value);
       hash_mix(h, static_cast<std::uint64_t>(o.price.value));
       hash_mix(h, static_cast<std::uint64_t>(o.leaves_qty.value));
@@ -252,6 +247,7 @@ std::uint64_t Book::state_hash() const noexcept {
       hash_mix(h, static_cast<std::uint64_t>(o.total_qty.value));
       hash_mix(h, static_cast<std::uint64_t>(o.display_qty.value));
       hash_mix(h, static_cast<std::uint64_t>(o.trigger_price.value));
+      hash_mix(h, static_cast<std::uint64_t>(o.stop_limit_price.value));
       hash_mix(h, static_cast<std::uint64_t>(o.participant.value));
       hash_mix(h, o.arrival_seq.value);
       hash_mix(h, static_cast<std::uint64_t>(o.type));
@@ -328,8 +324,8 @@ bool Book::check_invariants(std::string_view* error) const noexcept {
     Quantity sum{0};
     std::uint32_t count = 0;
     OrderIndex prev = kNullOrder;
-    for (OrderIndex cur = lv.head; cur != kNullOrder; cur = arena_[cur].next) {
-      const Order& o = arena_[cur];
+    for (OrderIndex cur = lv.head; cur != kNullOrder; cur = (*arena_)[cur].next) {
+      const Order& o = (*arena_)[cur];
       if (o.side != lv.side) {
         return fail("order side differs from its level side");
       }
@@ -371,14 +367,17 @@ bool Book::check_invariants(std::string_view* error) const noexcept {
   }
 
   // 5. The id index agrees with the arena: no orphans in either direction.
-  if (index_.size() != arena_.live_count()) {
+  if (index_->size() != arena_->live_count()) {
     return fail("id index size differs from live order count");
   }
-  for (std::uint32_t i = 0; i < arena_.capacity(); ++i) {
+  // Starts at 1: arena slot 0 is the reserved null sentinel and is never an
+  // order. Walking it would compare find_any(0) == 0, which is true for every
+  // empty book and says nothing.
+  for (std::uint32_t i = 1; i <= arena_->capacity(); ++i) {
     const auto idx = static_cast<OrderIndex>(i);
-    const Order& o = arena_[idx];
+    const Order& o = (*arena_)[idx];
     const bool linked = o.level != kNullLevel;
-    const bool in_index = index_.find_any(o.order_id) == idx;
+    const bool in_index = index_->find_any(o.order_id) == idx;
     if (linked != in_index) {
       return fail("id index and book disagree about an order");
     }

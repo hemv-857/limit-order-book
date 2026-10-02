@@ -1,5 +1,7 @@
 #include "core/book.hpp"
 
+#include "book_fixture.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -61,7 +63,8 @@ TEST(NoAlloc, ArenaDoesNotGrowWhileWorking) {
 }
 
 TEST(NoAlloc, BookOpsDoNotAllocate) {
-  Book book(alloc_config());
+  testing::BookFixture fixture(alloc_config());
+  Book& book = fixture.book;
   // Warm up outside the guard: the constructor legitimately allocates the
   // level array, the bitmap, the arena and the id index exactly once.
   for (std::int64_t p = 0; p < 100; ++p) {

@@ -7,6 +7,11 @@ lob_add_library(lob_core
   SOURCES
     types.cpp
     book.cpp
+    engine.cpp
+    events.cpp
+    validate.cpp
+    risk.cpp
+    stp.cpp
 )
 
 target_include_directories(lob_core PUBLIC "${PROJECT_SOURCE_DIR}/src")

@@ -10,3 +10,7 @@ gtest_discover_tests(test_book)
 add_executable(test_no_alloc no_alloc_test.cpp alloc_guard.cpp)
 target_link_libraries(test_no_alloc PRIVATE lob_core GTest::gtest_main lob_warnings)
 gtest_discover_tests(test_no_alloc)
+
+add_executable(test_engine engine_test.cpp)
+target_link_libraries(test_engine PRIVATE lob_core GTest::gtest_main lob_warnings)
+gtest_discover_tests(test_engine)

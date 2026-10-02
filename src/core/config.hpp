@@ -137,6 +137,8 @@ enum class RejectCode : std::uint8_t {
 };
 
 [[nodiscard]] std::string_view to_string(RejectCode code) noexcept;
+[[nodiscard]] std::string_view to_string(StpMode mode) noexcept;
+[[nodiscard]] std::string_view to_string(PostOnlyAction action) noexcept;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -176,10 +178,25 @@ struct SymbolConfig {
   /// Messages per second allowed per participant. Zero disables the limit.
   std::uint32_t rate_limit_per_second{0};
 
+  /// Expected number of distinct participants trading this symbol. Sizes the
+  /// rate limiter's table once, at startup.
+  std::uint32_t max_participants{1024};
+
+  /// Whether this symbol accepts stop and stop-limit orders. Disabled symbols
+  /// pay nothing for the stop book and cannot accumulate stops.
+  bool stop_enabled{true};
+
   /// Compute the number of price ticks in the grid, rejecting a domain that is
   /// too large to pre-allocate. This is what keeps the book allocation-free.
   [[nodiscard]] constexpr std::uint32_t price_domain() const noexcept {
     return static_cast<std::uint32_t>(max_price - min_price + 1);
+  }
+
+  /// Whether a price is representable in this symbol's grid. The grid is a flat
+  /// array indexed by this range, so an out-of-range price has no level to land
+  /// in and must be rejected rather than clamped.
+  [[nodiscard]] constexpr bool contains(std::int64_t price) const noexcept {
+    return price >= min_price && price <= max_price;
   }
 };
 

@@ -20,25 +20,34 @@ namespace lob {
 /// unbounded latency spike the design is meant to eliminate.
 class OrderArena {
  public:
-  explicit OrderArena(std::uint32_t capacity) : nodes_(capacity), capacity_(capacity) {
+  /// `capacity` is the number of *usable* order slots. The backing array holds
+  /// one more element than that, because index 0 is reserved as the null
+  /// sentinel and usable indices run 1..capacity.
+  explicit OrderArena(std::uint32_t capacity)
+      : nodes_(static_cast<std::size_t>(capacity) + 1U), capacity_(capacity) {
     // Seed the free list back-to-front so allocation hands out slots in
-    // ascending index order. Ascending order keeps newly created orders packed
-    // at the front of the array, which is friendlier to the prefetcher than
-    // handing out a random permutation.
-    for (std::uint32_t i = capacity; i > 0; --i) {
-      nodes_[i - 1].free_next = (i == capacity) ? kNullOrder : static_cast<OrderIndex>(i);
+    // ascending index order, which keeps live orders packed at the front of the
+    // array. Slot 0 is the null sentinel: it is seeded as free so a naive walk
+    // terminates, but it is never handed out, because the loop stops at i > 1.
+    // Walks one past capacity because usable slots are 1..capacity inclusive;
+    // stopping at `i > 1` over `i = capacity` would leave slot `capacity` off
+    // the list entirely.
+    for (std::uint32_t i = capacity + 1U; i > 1; --i) {
+      nodes_[i - 1].free_next = (i == capacity + 1U) ? kNullOrder : static_cast<OrderIndex>(i);
     }
-    free_head_ = capacity > 0 ? OrderIndex{0} : kNullOrder;
+    nodes_[0].free_next = kNullOrder;
+    free_head_ = capacity > 1 ? OrderIndex{1} : kNullOrder;
   }
 
   ~OrderArena() = default;
 
   OrderArena(const OrderArena&) = delete;
   OrderArena& operator=(const OrderArena&) = delete;
-  OrderArena(OrderArena&&) = delete;
-  OrderArena& operator=(OrderArena&&) = delete;
+  OrderArena(OrderArena&&) = default;
+  OrderArena& operator=(OrderArena&&) = default;
 
-  /// Take a slot off the free list, or return kNullOrder when full.
+  /// Take a slot off the free list, or return kNullOrder (zero) when full.
+  /// Indices handed out are always >= 1.
   ///
   /// The generation is incremented on *both* allocation and release so that a
   /// live order's generation is never 0. That matters because OrderIndexTable
@@ -86,6 +95,8 @@ class OrderArena {
     return nodes_[idx];
   }
 
+  /// Usable slots. The backing vector has one more element than this; that
+  /// extra one is the null sentinel at index 0.
   [[nodiscard]] std::uint32_t capacity() const noexcept {
     return capacity_;
   }

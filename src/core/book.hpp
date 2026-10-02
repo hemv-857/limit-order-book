@@ -67,7 +67,11 @@ struct TopOfBook {
 /// configured price domain.
 class Book {
  public:
-  explicit Book(const SymbolConfig& cfg);
+  /// The book owns price structure only. Order storage and the id index belong
+  /// to the caller, because a symbol needs two books over the *same* orders:
+  /// the resting book and the stop book. If each book owned an arena, a stop
+  /// order's index would mean different things in the two of them.
+  Book(const SymbolConfig& cfg, OrderArena& arena, OrderIndexTable& index);
 
   ~Book() = default;
 
@@ -98,9 +102,17 @@ class Book {
   /// level index is out of range.
   bool add_to_queue(OrderIndex idx) noexcept;
 
-  /// Unlink an order from its level and update the level aggregate and the
-  /// cached extremes.
+  /// Unlink an order from its level, reducing the level aggregate by the
+  /// quantity the order currently contributes and fixing the cached extremes.
   void remove_from_queue(OrderIndex idx) noexcept;
+
+  /// Reduce a level's aggregate by `qty` without touching the queue.
+  ///
+  /// Needed by partial fills. A fill decrements an order's leaves in place, so
+  /// unlinking it afterwards would subtract the *post*-fill quantity (possibly
+  /// zero) and leave the level aggregate stale. Unlinking before the decrement
+  /// is only correct when the order is leaving the level entirely.
+  void reduce_level(LevelIndex idx, Quantity qty) noexcept;
 
   /// Move an order from the back of its current level to the back of its new
   /// level, which is how a price change or a quantity increase loses priority.
@@ -109,27 +121,75 @@ class Book {
   // ---- lookup -------------------------------------------------------------
 
   [[nodiscard]] OrderIndex find(OrderId id) const noexcept {
-    return index_.find_any(id);
+    return index_->find_any(id);
+  }
+
+  /// Whether an order id is live in this book (resting liquidity).
+  [[nodiscard]] bool index_contains(OrderId id) const noexcept {
+    return index_->contains(id);
   }
 
   [[nodiscard]] Order& operator[](OrderIndex idx) noexcept {
-    return arena_[idx];
+    return (*arena_)[idx];
   }
   [[nodiscard]] const Order& operator[](OrderIndex idx) const noexcept {
-    return arena_[idx];
+    return (*arena_)[idx];
+  }
+
+  /// Direct access to a level, so callers can walk occupied levels without
+  /// repeating the emptiness test.
+  [[nodiscard]] Level& level_at(LevelIndex idx) noexcept {
+    return levels_[idx];
+  }
+  [[nodiscard]] const Level& level_at(LevelIndex idx) const noexcept {
+    return levels_[idx];
+  }
+
+  /// Occupancy navigation. These are the same bitmap scans that maintain the
+  /// cached extremes; the engine needs them to walk stop triggers.
+  [[nodiscard]] LevelIndex next_occupied_index(LevelIndex idx) const noexcept {
+    return next_occupied(static_cast<std::size_t>(idx));
+  }
+  [[nodiscard]] LevelIndex prev_occupied_index(LevelIndex idx) const noexcept {
+    return prev_occupied(static_cast<std::size_t>(idx));
+  }
+  /// Lowest / highest occupied level in the whole domain.
+  ///
+  /// Not the same as prev_occupied(domain_) and next_occupied(0): those return
+  /// the *nearest* occupied index to a cursor, which at the domain edge is the
+  /// highest and lowest respectively -- exactly inverted. These scan words in
+  /// the right direction, which is O(words) worst case; callers use them once
+  /// and then walk with the O(1) next/prev_occupied_index steps.
+  [[nodiscard]] LevelIndex lowest_occupied() const noexcept {
+    for (std::size_t word = 0; word < bitmap_words_; ++word) {
+      if (occupied_[word] != 0) {
+        return static_cast<LevelIndex>((word * 64U) +
+                                       static_cast<unsigned>(__builtin_ctzll(occupied_[word])));
+      }
+    }
+    return kNullLevel;
+  }
+  [[nodiscard]] LevelIndex highest_occupied() const noexcept {
+    for (std::size_t word = bitmap_words_; word-- > 0;) {
+      if (occupied_[word] != 0) {
+        const unsigned msb = 63U - static_cast<unsigned>(__builtin_clzll(occupied_[word]));
+        return static_cast<LevelIndex>((word * 64U) + msb);
+      }
+    }
+    return kNullLevel;
   }
 
   [[nodiscard]] OrderArena& arena() noexcept {
-    return arena_;
+    return *arena_;
   }
   [[nodiscard]] const OrderArena& arena() const noexcept {
-    return arena_;
+    return *arena_;
   }
-  OrderIndexTable& id_index() noexcept {
-    return index_;
+  [[nodiscard]] OrderIndexTable& id_index() noexcept {
+    return *index_;
   }
-  const OrderIndexTable& id_index() const noexcept {
-    return index_;
+  [[nodiscard]] const OrderIndexTable& id_index() const noexcept {
+    return *index_;
   }
 
   [[nodiscard]] const SymbolConfig& config() const noexcept {
@@ -191,8 +251,6 @@ class Book {
   /// Nearest occupied level strictly below / above `idx`, or kNullLevel.
   [[nodiscard]] LevelIndex prev_occupied(std::size_t idx) const noexcept;
   [[nodiscard]] LevelIndex next_occupied(std::size_t idx) const noexcept;
-  void refresh_best_bid() noexcept;
-  void refresh_best_ask() noexcept;
 
   SymbolConfig cfg_;
   std::int64_t min_price_{0};
@@ -202,8 +260,8 @@ class Book {
 
   std::vector<Level> levels_;
   std::vector<std::uint64_t> occupied_;
-  OrderArena arena_;
-  OrderIndexTable index_;
+  OrderArena* arena_;
+  OrderIndexTable* index_;
 
   LevelIndex best_bid_{kNullLevel};
   LevelIndex best_ask_{kNullLevel};

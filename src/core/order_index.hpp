@@ -40,8 +40,8 @@ class OrderIndexTable {
 
   OrderIndexTable(const OrderIndexTable&) = delete;
   OrderIndexTable& operator=(const OrderIndexTable&) = delete;
-  OrderIndexTable(OrderIndexTable&&) = delete;
-  OrderIndexTable& operator=(OrderIndexTable&&) = delete;
+  OrderIndexTable(OrderIndexTable&&) = default;
+  OrderIndexTable& operator=(OrderIndexTable&&) = default;
 
   /// Create a table able to hold at least `min_capacity` entries without
   /// exceeding the configured load factor.
