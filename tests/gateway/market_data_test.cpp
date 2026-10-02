@@ -134,7 +134,7 @@ TEST(MarketData, SnapshotDescribesTheCurrentTouch) {
   e.submit(ord(OrderId{1}, Side::Buy, Price{100}, Quantity{5}));
   e.submit(ord(OrderId{2}, Side::Sell, Price{102}, Quantity{3}));
 
-  const protocol::SnapshotPayload s = make_snapshot(e.book(kSym), kSym, 42);
+  const protocol::SnapshotPayload s = make_snapshot(kSym, e.book(kSym).top_of_book(), 42);
   EXPECT_EQ(s.sequence, 42u);
   EXPECT_EQ(s.symbol.value, 0u);
   ASSERT_TRUE(s.has_bid);
@@ -147,7 +147,7 @@ TEST(MarketData, SnapshotDescribesTheCurrentTouch) {
 
 TEST(MarketData, EmptyBookSnapshotSaysSo) {
   Engine e({base_config()}, EngineConfig{});
-  const protocol::SnapshotPayload s = make_snapshot(e.book(kSym), kSym, 1);
+  const protocol::SnapshotPayload s = make_snapshot(kSym, e.book(kSym).top_of_book(), 1);
   EXPECT_FALSE(s.has_bid);
   EXPECT_FALSE(s.has_ask);
 }
@@ -186,7 +186,8 @@ TEST(MarketData, SubscribeDeliversASnapshotFirst) {
   e.submit(ord(OrderId{1}, Side::Buy, Price{100}, Quantity{5}));
   MarketDataPublisher pub;
 
-  ASSERT_TRUE(pub.subscribe(SessionId{7}, kSym, e.book(kSym), last_seq(e)));
+  ASSERT_TRUE(pub.subscribe(SessionId{7}, kSym,
+                            make_snapshot(kSym, e.book(kSym).top_of_book(), last_seq(e))));
   const auto frames = decode_all(pub.outbox(SessionId{7}));
   ASSERT_EQ(frames.size(), 1u);
   EXPECT_EQ(frames[0].type, protocol::MessageType::MarketDataSnapshot);
@@ -196,15 +197,18 @@ TEST(MarketData, SubscribeDeliversASnapshotFirst) {
 TEST(MarketData, ResubscribingIsRefused) {
   Engine e({base_config()}, EngineConfig{});
   MarketDataPublisher pub;
-  EXPECT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 1));
-  EXPECT_FALSE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 2))
+  EXPECT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 1)));
+  EXPECT_FALSE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 2)))
       << "a second subscribe must not silently reset the boundary";
 }
 
 TEST(MarketData, UnsubscribeStopsDelivery) {
   Engine e({base_config()}, EngineConfig{});
   MarketDataPublisher pub;
-  ASSERT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 1));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 1)));
   std::vector<std::uint8_t> taken;
   pub.take(SessionId{1}, taken);
 
@@ -225,7 +229,8 @@ TEST(MarketData, IncrementsAtOrBelowTheSnapshotSequenceAreNotDelivered) {
   Engine e({base_config()}, EngineConfig{});
   e.submit(ord(OrderId{1}, Side::Buy, Price{100}, Quantity{5}));
   MarketDataPublisher pub;
-  ASSERT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 100));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 100)));
   std::vector<std::uint8_t> sink;
   pub.take(SessionId{1}, sink);  // drain the snapshot; only increments matter here
 
@@ -244,7 +249,8 @@ TEST(MarketData, IncrementsAtOrBelowTheSnapshotSequenceAreNotDelivered) {
 TEST(MarketData, IncrementsAfterTheSnapshotAreDeliveredInOrder) {
   Engine e({base_config()}, EngineConfig{});
   MarketDataPublisher pub;
-  ASSERT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 100));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 100)));
   std::vector<std::uint8_t> taken;
   pub.take(SessionId{1}, taken);
 
@@ -272,8 +278,10 @@ TEST(MarketData, EachSubscriberHasItsOwnBoundary) {
   // see exactly the part of it that postdates their own snapshot.
   Engine e({base_config()}, EngineConfig{});
   MarketDataPublisher pub;
-  ASSERT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 10));
-  ASSERT_TRUE(pub.subscribe(SessionId{2}, kSym, e.book(kSym), 20));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 10)));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{2}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 20)));
   std::vector<std::uint8_t> sink;
   pub.take(SessionId{1}, sink);
   pub.take(SessionId{2}, sink);
@@ -298,7 +306,8 @@ TEST(MarketData, EachSubscriberHasItsOwnBoundary) {
 TEST(MarketData, EventsForUnsubscribedSymbolsAreNotDelivered) {
   Engine e({base_config()}, EngineConfig{});
   MarketDataPublisher pub;
-  ASSERT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 1));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 1)));
   std::vector<std::uint8_t> sink;
   pub.take(SessionId{1}, sink);  // drain the snapshot
   Event ev;
@@ -322,7 +331,8 @@ TEST(MarketData, ReconstructingFromSnapshotAndIncrementsMatchesTheLiveBook) {
   e.submit(ord(OrderId{2}, Side::Buy, Price{99}, Quantity{7}));
   e.submit(ord(OrderId{3}, Side::Sell, Price{105}, Quantity{4}));
   const std::uint64_t boundary = last_seq(e);
-  ASSERT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), boundary));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), boundary)));
 
   // Churn the book and fan every event out as it happens.
   for (int i = 10; i <= 60; ++i) {
@@ -377,7 +387,8 @@ TEST(MarketData, SubscriberThatExceedsItsCapIsDroppedNotSkipped) {
   cfg.max_outbox_bytes = 512;
   MarketDataPublisher pub(cfg);
 
-  ASSERT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 0));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 0)));
   for (std::uint64_t seq = 1; seq <= 500; ++seq) {
     Event ev;
     ev.type = EventType::BookUpdate;
@@ -401,7 +412,8 @@ TEST(MarketData, SubscriberThatExceedsItsCapIsDroppedNotSkipped) {
   ev.seq = Sequence{9999};
   pub.publish(ev);
   EXPECT_EQ(pub.outbox(SessionId{1}).size(), after);
-  EXPECT_FALSE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 10'000));
+  EXPECT_FALSE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 10'000)));
 }
 
 TEST(MarketData, OneSlowSubscriberDoesNotStarveOthers) {
@@ -409,8 +421,10 @@ TEST(MarketData, OneSlowSubscriberDoesNotStarveOthers) {
   MarketDataConfig cfg;
   cfg.max_outbox_bytes = 512;
   MarketDataPublisher pub(cfg);
-  ASSERT_TRUE(pub.subscribe(SessionId{1}, kSym, e.book(kSym), 0));
-  ASSERT_TRUE(pub.subscribe(SessionId{2}, kSym, e.book(kSym), 0));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{1}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 0)));
+  ASSERT_TRUE(
+      pub.subscribe(SessionId{2}, kSym, make_snapshot(kSym, e.book(kSym).top_of_book(), 0)));
   // Drain the fast one so it never fills up.
   std::vector<std::uint8_t> sink;
   pub.take(SessionId{2}, sink);

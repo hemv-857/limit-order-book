@@ -191,6 +191,13 @@ int Reactor::poll_once(int timeout_ms) {
 
 #endif  // __linux__
 
+#ifdef __linux__
+void Reactor::set_write_interest(int, bool) {
+  // epoll has no separate write filter to toggle: readability and writability
+  // arrive in one mask, so there is nothing to arm or disarm.
+}
+#endif  // __linux__
+
 void Reactor::handle_readable(int fd) {
   Connection* c = lookup(handler_, ids_, fd);
   if (c == nullptr) {

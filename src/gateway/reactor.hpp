@@ -25,6 +25,7 @@
 #include "gateway/session.hpp"
 #include "gateway/write_queue.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -105,6 +106,15 @@ class Reactor {
   /// Stop watching `fd` and forget the connection. Does not close the fd.
   void release(int fd);
 
+  /// Arm or disarm the write filter for `fd`.
+  ///
+  /// Public because the owner is the only thing that knows when there is pending
+  /// output. An always-armed write filter makes a level-triggered kqueue spin at
+  /// 100% CPU on an idle connection; an always-disarmed one never flushes a
+  /// partially written frame. On epoll this is a no-op, since that backend has no
+  /// separate write filter to toggle.
+  void set_write_interest(int fd, bool wanted);
+
   /// Wait for readiness and dispatch. `timeout_ms` of -1 blocks indefinitely.
   /// Returns the number of connections dispatched.
   int poll_once(int timeout_ms);
@@ -113,7 +123,14 @@ class Reactor {
   void run();
 
   void stop() noexcept {
-    running_ = false;
+    running_.store(false, std::memory_order_release);
+  }
+
+  /// True once stop() has been called. An owner looping around poll_once() must
+  /// check this: a stop flag nothing reads leaves the loop spinning, and joining
+  /// that thread then hangs forever.
+  [[nodiscard]] bool stopped() const noexcept {
+    return !running_.load(std::memory_order_acquire);
   }
 
   /// Listener fds to poll. Handled by the owner; the reactor only watches
@@ -136,11 +153,18 @@ class Reactor {
   /// Arm or disarm the write filter. Writability comes and goes with the outbox,
   /// and an always-armed write filter spins a level-triggered kqueue at 100% CPU
   /// on an idle connection.
-  void set_write_interest(int fd, bool wanted);
 #endif
 
   ReactorHandler& handler_;
-  bool running_ = false;
+  /// Starts true: a constructed reactor is meant to be polled until stopped.
+  /// Defaulting this to false made stopped() report true before anything ran, so
+  /// an owner looping on it never entered the loop at all.
+  ///
+  /// Atomic, and it has to be: stop() is called from one thread and stopped() is
+  /// read from the loop on another. As a plain bool the loop is free to hoist the
+  /// read out entirely and spin forever on a value that has already changed --
+  /// which is exactly what happened, and is invisible without a race detector.
+  std::atomic<bool> running_{true};
   std::vector<int> listeners_;
   std::unordered_map<int, std::uint64_t> ids_;
   /// Connections live in the handler; the reactor keeps only fd -> id.

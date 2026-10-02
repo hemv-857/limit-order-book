@@ -4,20 +4,19 @@
 
 namespace lob {
 
-protocol::SnapshotPayload make_snapshot(const Book& book, SymbolId symbol,
+protocol::SnapshotPayload make_snapshot(SymbolId symbol, const TopOfBook& top_of_book,
                                         std::uint64_t sequence) noexcept {
-  const TopOfBook tob = book.top_of_book();
   protocol::SnapshotPayload s;
   s.sequence = sequence;
   s.symbol = symbol;
-  s.has_bid = tob.has_bid;
-  s.best_bid = tob.best_bid.value;
-  s.best_bid_qty = tob.best_bid_qty.value;
-  s.best_bid_orders = tob.best_bid_orders;
-  s.has_ask = tob.has_ask;
-  s.best_ask = tob.best_ask.value;
-  s.best_ask_qty = tob.best_ask_qty.value;
-  s.best_ask_orders = tob.best_ask_orders;
+  s.has_bid = top_of_book.has_bid;
+  s.best_bid = top_of_book.best_bid.value;
+  s.best_bid_qty = top_of_book.best_bid_qty.value;
+  s.best_bid_orders = top_of_book.best_bid_orders;
+  s.has_ask = top_of_book.has_ask;
+  s.best_ask = top_of_book.best_ask.value;
+  s.best_ask_qty = top_of_book.best_ask_qty.value;
+  s.best_ask_orders = top_of_book.best_ask_orders;
   return s;
 }
 
@@ -64,8 +63,8 @@ bool MarketDataPublisher::enqueue(Subscriber& sub, protocol::MessageType type,
 }
 // NOLINTEND(readability-make-member-function-const)
 
-bool MarketDataPublisher::subscribe(SessionId session, SymbolId symbol, const Book& book,
-                                    std::uint64_t sequence) {
+bool MarketDataPublisher::subscribe(SessionId session, SymbolId symbol,
+                                    const protocol::SnapshotPayload& snapshot) {
   Subscriber& sub = subscribers_[session.value];
   if (sub.dropped) {
     return false;
@@ -79,10 +78,10 @@ bool MarketDataPublisher::subscribe(SessionId session, SymbolId symbol, const Bo
   }
   // Seed the boundary *before* queueing, so an increment that arrives during
   // this call cannot be delivered ahead of the snapshot it belongs after.
-  sub.delivered_through.emplace(symbol.value, sequence);
+  sub.delivered_through.emplace(symbol.value, snapshot.sequence);
 
   protocol::Inbound m;
-  m.snapshot = make_snapshot(book, symbol, sequence);
+  m.snapshot = snapshot;
   return enqueue(sub, protocol::MessageType::MarketDataSnapshot, m);
 }
 

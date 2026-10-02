@@ -52,10 +52,10 @@ struct MarketDataConfig {
   std::size_t max_symbols_per_session = 4096;
 };
 
-/// A snapshot taken from a live book. `sequence` is the engine sequence current
-/// at the moment the top of book was read -- read it *after* the book, so it is
+/// Build a snapshot payload from a top of book. `sequence` is the engine sequence
+/// current at the moment the touch was read -- read it *after* the book, so it is
 /// never stale relative to the snapshot it accompanies.
-[[nodiscard]] protocol::SnapshotPayload make_snapshot(const Book& book, SymbolId symbol,
+[[nodiscard]] protocol::SnapshotPayload make_snapshot(SymbolId symbol, const TopOfBook& top_of_book,
                                                       std::uint64_t sequence) noexcept;
 
 /// Build an increment payload from an engine BookUpdate event. Returns false for
@@ -69,13 +69,17 @@ class MarketDataPublisher {
 
   /// Start delivering `symbol` to `session`.
   ///
-  /// Queues a snapshot built from `book` and stamped with `sequence`, then marks
-  /// the session as having seen everything up to and including it. `sequence`
-  /// must be read from the engine after reading `book`.
+  /// Queues `snapshot` and marks the session as having seen everything up to and
+  /// including `snapshot.sequence`.
+  ///
+  /// Takes a payload rather than a `Book` deliberately: the book is owned by a
+  /// shard worker thread, and an API accepting one invites a caller to read it
+  /// from the wrong thread. The snapshot must be taken on the shard that owns
+  /// the book.
   ///
   /// Returns false if the subscription was refused (already subscribed, at the
   /// symbol cap, or the subscriber was already dropped as slow).
-  bool subscribe(SessionId session, SymbolId symbol, const Book& book, std::uint64_t sequence);
+  bool subscribe(SessionId session, SymbolId symbol, const protocol::SnapshotPayload& snapshot);
 
   /// Stop delivering `symbol`. Returns false if it was not subscribed.
   bool unsubscribe(SessionId session, SymbolId symbol);

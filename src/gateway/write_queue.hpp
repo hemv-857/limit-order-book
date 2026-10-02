@@ -39,6 +39,12 @@ class WriteQueue {
     buffer_.append(bytes);
   }
 
+  /// Append raw bytes, for callers holding a buffer rather than a view.
+  void append(const char* data, std::size_t len) {
+    compact_if_worthwhile();
+    buffer_.append(data, len);
+  }
+
   /// The contiguous bytes ready to be written, oldest first. Empty when there is
   /// nothing pending. The view is invalidated by `append` or `consume`.
   ///
