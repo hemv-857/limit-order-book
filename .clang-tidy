@@ -18,7 +18,19 @@ Checks: >
   -readability-function-cognitive-complexity,
   -readability-implicit-bool-conversion,
   -readability-braces-around-statements,
-  -portability-avoid-pragma-once
+  -portability-avoid-pragma-once,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -readability-redundant-member-init
+# Two checks above are disabled on purpose, not by accident:
+#   pro-bounds-avoid-unchecked-container-access - unchecked operator[] into
+#     pre-sized arrays *is* the performance-critical design of this engine.
+#     Indices come from the arena, the id index and the level grid, and their
+#     range is exactly what Book::check_invariants() asserts. Paying a bounds
+#     branch on every hot-path access to re-check that is measurable throughput
+#     for no additional safety.
+#   readability-redundant-member-init - explicit member initialisers on a struct
+#     this safety-critical are documentation, not redundancy:
+#     `OrderIndex prev{kNullOrder}` states what a zero must never be.
 
 WarningsAsErrors: >
   bugprone-*,

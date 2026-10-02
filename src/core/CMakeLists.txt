@@ -6,6 +6,7 @@
 lob_add_library(lob_core
   SOURCES
     types.cpp
+    book.cpp
 )
 
 target_include_directories(lob_core PUBLIC "${PROJECT_SOURCE_DIR}/src")

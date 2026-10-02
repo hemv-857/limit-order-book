@@ -160,7 +160,7 @@ and its box ticked **here in this file**.
 - [x] **M0 — Skeleton & toolchain.** CMake presets (`debug`, `release`,
       `asan-ubsan`, `tsan`, `coverage`), warnings-as-errors, clang-format/tidy
       configs, local tool bootstrap script, `.gitignore`, license.
-- [ ] **M1 — Core types + order book.** Strong types, arena, hash index, grid,
+- [x] **M1 — Core types + order book.** Strong types, arena, hash index, grid,
       FIFO levels, cancel, state hash, unit tests, zero-allocation test.
 - [ ] **M2 — Full semantics.** Order types, TIFs, post-only, iceberg, stops,
       replace, mass cancel, STP, pre-trade risk + reject codes; naive reference
