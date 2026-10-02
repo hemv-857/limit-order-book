@@ -208,9 +208,21 @@ and its box ticked **here in this file**.
       empty for microseconds at a time in steady state, so a backoff would cost
       latency and buy nothing. Real adaptive backoff needs a saturation
       measurement, which is M8.
-- [ ] **M5 — Gateway & protocol.** Wire codec, framing, session state machine,
-      reactor interface (epoll + kqueue), partial I/O, slow-consumer policy,
-      heartbeat/timeout, market data publisher with snapshot+increments.
+- [~] **M5 — Gateway & protocol.**
+      **Done: wire codec and framing** (`src/protocol`). Fixed-size frames with
+      a length cap, CRC-32C verified *before* the payload is parsed, and an
+      incremental `FrameReader` that reassembles messages delivered one byte at
+      a time. `Sequence` and `Timestamp` are never taken from the wire — a
+      client-supplied sequence would let any participant pick its ordering
+      relative to everyone else; the sequencer stamps them.
+      Verified by round-trip tests per message type plus 20k random byte strings
+      and 20k single-bit mutations of valid frames, which must never be accepted
+      or read out of bounds (ASan/UBSan are what make that meaningful).
+      `crc32c` moved to `src/util` so the journal and the wire share one
+      implementation instead of two.
+      **Not done:** session state machine, reactor (epoll + kqueue), partial
+      write handling and the slow-consumer policy, heartbeat/timeout, and the
+      market data publisher with snapshot+increments.
 - [ ] **M6 — Tools & e2e.** `venue`, `lobctl`, `loadgen`, `replay`, `bookviz`;
       end-to-end integration tests over real TCP.
 - [ ] **M7 — Fuzzing & sanitizers.** Fuzz targets for protocol decoder, journal

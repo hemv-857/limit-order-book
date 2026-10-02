@@ -30,11 +30,6 @@
 
 namespace lob {
 
-/// CRC-32C (Castagnoli). Software table-driven: recovery runs once at startup,
-/// off the hot path, so the cost is irrelevant and the code stays portable.
-[[nodiscard]] std::uint32_t crc32c(const void* data, std::size_t len,
-                                   std::uint32_t seed = 0) noexcept;
-
 enum class RecordKind : std::uint8_t {
   Invalid = 0,
   NewOrder = 1,

@@ -1,5 +1,7 @@
 #include "journal/journal.hpp"
 
+#include "util/crc32c.hpp"
+
 #include <array>
 #include <cstring>
 #include <functional>
@@ -10,24 +12,6 @@ namespace {
 constexpr std::array<char, 4> kMagic{'L', 'O', 'B', 'J'};
 constexpr std::size_t kHeaderLen = 4 + 1 + 4;  // magic + kind + length
 constexpr std::size_t kCrcLen = 4;
-
-/// CRC-32C polynomial, reflected.
-constexpr std::uint32_t kPoly = 0x82F63B78U;
-
-const std::array<std::uint32_t, 256>& crc_table() {
-  static const std::array<std::uint32_t, 256> table = [] {
-    std::array<std::uint32_t, 256> t{};
-    for (std::uint32_t i = 0; i < 256; ++i) {
-      std::uint32_t c = i;
-      for (int k = 0; k < 8; ++k) {
-        c = (c & 1U) != 0U ? (c >> 1U) ^ kPoly : c >> 1U;
-      }
-      t[i] = c;
-    }
-    return t;
-  }();
-  return table;
-}
 
 void put_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
   for (int i = 0; i < 4; ++i) {
@@ -114,16 +98,6 @@ class Reader {
 };
 
 }  // namespace
-
-std::uint32_t crc32c(const void* data, std::size_t len, std::uint32_t seed) noexcept {
-  const auto* p = static_cast<const std::uint8_t*>(data);
-  const auto& t = crc_table();
-  std::uint32_t c = ~seed;
-  for (std::size_t i = 0; i < len; ++i) {
-    c = t[(c ^ p[i]) & 0xFFU] ^ (c >> 8U);
-  }
-  return ~c;
-}
 
 void encode_payload(const JournalRecord& r, std::vector<std::uint8_t>& out) {
   // No kind byte: the frame header already carries it, and duplicating it here

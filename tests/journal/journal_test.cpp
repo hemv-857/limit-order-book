@@ -1,5 +1,7 @@
 #include "journal/journal.hpp"
 
+#include "util/crc32c.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cstring>
