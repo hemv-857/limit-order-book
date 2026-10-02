@@ -166,12 +166,15 @@ and its box ticked **here in this file**.
       replace, mass cancel, STP, pre-trade risk + reject codes.
 - [x] **M2b — Randomised invariant probe.** Seeded mixed operation stream with
       every invariant re-checked periodically; 20 M ops clean.
-- [ ] **M2c — Reference engine + differential test.** Naive `std::map` +
-      `std::deque` engine compared event-for-event over ≥ 10 M randomized ops.
-      **Not done.** An earlier attempt was abandoned rather than shipped
-      half-correct. `validate_new_order` was refactored to take a `SymbolRules`
-      POD so the reference can share the reject ladder without depending on the
-      production book layout.
+- [~] **M2c — Reference engine + differential test.** Naive `std::map` +
+      `std::deque` engine (`tests/reference`), compared event-for-event and by a
+      canonical book digest after *every* operation (`tests/differential`).
+      **Built and running; does not yet agree.** It found two real L2-stream
+      defects in the production engine (rest_remainder hardcoding `Added`, and a
+      filled maker hardcoding `Removed`) and four bugs in the reference itself.
+      One divergence remains: a FOK multi-level sweep leaves the production book
+      crossed. Tests are `DISABLED_` with the divergence documented at the call
+      site, not silently dropped.
 - [ ] **M3 — Journal & recovery.** WAL framing with CRC32C, segment rotation,
       fsync policy, snapshots, replay, torn-tail handling, state-hash equality.
 - [ ] **M4 — Engine runtime.** SPSC rings (documented memory ordering), sequencer,

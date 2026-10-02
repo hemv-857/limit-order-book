@@ -804,6 +804,57 @@ TEST_F(EngineTest, MassCancelAlsoRemovesPendingStops) {
   ExpectInvariants(e);
 }
 
+TEST_F(EngineTest, RestingIntoAnOccupiedLevelReportsChangedNotAdded) {
+  // Regression found by the differential test: rest_remainder hardcoded
+  // UpdateAction::Added even when the level already held orders. A market data
+  // consumer told "level appeared" for a level that was already there would
+  // build a wrong L2 book.
+  Engine e = make_one();
+  e.submit(ord(OrderId{1}, Side::Sell, Price{100}, Quantity{5}, ParticipantId{2}));
+  e.clear_events();
+
+  // Buy 8: fills 5 at 100 and rests the remaining 3 at 101.
+  e.submit(ord(OrderId{2}, Side::Buy, Price{101}, Quantity{8}, ParticipantId{1}));
+  std::vector<std::string> adds;
+  for (std::size_t i = 0; i < e.events().size(); ++i) {
+    const Event& ev = e.events()[i];
+    if (ev.type == EventType::BookUpdate && ev.action == UpdateAction::Added) {
+      adds.push_back(ev.to_string());
+    }
+  }
+  // Exactly one Added: the 101 level, which was genuinely new.
+  ASSERT_EQ(adds.size(), 1u);
+  EXPECT_NE(adds[0].find("101 3 added"), std::string::npos) << adds[0];
+  ExpectInvariants(e);
+}
+
+TEST_F(EngineTest, ExhaustingAMakerInAMultiOrderLevelReportsChanged) {
+  // Regression found by the differential test: a fully filled maker hardcoded
+  // UpdateAction::Removed, so the engine reported a level as deleted while still
+  // quoting its remaining aggregate.
+  Engine e = make_one();
+  e.submit(ord(OrderId{1}, Side::Sell, Price{100}, Quantity{2}, ParticipantId{2}));
+  e.submit(ord(OrderId{2}, Side::Sell, Price{100}, Quantity{9}, ParticipantId{3}));
+  e.clear_events();
+
+  e.submit(ord(OrderId{3}, Side::Buy, Price{100}, Quantity{2}, ParticipantId{1}));
+
+  // The first maker is consumed but the level survives with 9 left. Find the
+  // delta rather than assuming an index: event ordering is itself under test.
+  const Event* delta = nullptr;
+  for (std::size_t i = 0; i < e.events().size(); ++i) {
+    if (e.events()[i].type == EventType::BookUpdate) {
+      delta = &e.events()[i];
+      break;
+    }
+  }
+  ASSERT_NE(delta, nullptr);
+  EXPECT_EQ(delta->action, UpdateAction::Changed);
+  EXPECT_EQ(delta->qty.value, 9);
+  EXPECT_TRUE(e.book(kSym).top_of_book().has_ask);
+  ExpectInvariants(e);
+}
+
 TEST_F(EngineTest, BuyStopBelowTheLastTradeIsRejectedAsWrongSide) {
   Engine e = make_one();
   e.submit(ord(OrderId{1}, Side::Sell, Price{100}, Quantity{10}, ParticipantId{2}));

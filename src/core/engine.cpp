@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <string>
 #include <utility>
 
 namespace lob {
@@ -443,7 +444,12 @@ void Engine::execute_fill(SymbolState& st, OrderIndex aggressor_idx, OrderIndex 
     // event -- the fills already told the client everything.
     st.index.erase(maker.order_id);
     st.arena.release(maker_idx);
-    emit_delta(st, maker_level, UpdateAction::Removed);
+    // The level is only gone if this was its last order. Hardcoding Removed
+    // would report a level as deleted while still quoting its remaining
+    // aggregate, which corrupts a subscriber's L2 book.
+    emit_delta(
+        st, maker_level,
+        st.book.level_at(maker_level).empty() ? UpdateAction::Removed : UpdateAction::Changed);
   } else {
     emit_delta(st, maker_level, UpdateAction::Changed);
     if (maker.is_iceberg() && fill.value == shown.value && maker.leaves_qty.value > 0) {
@@ -577,11 +583,16 @@ void Engine::rest_remainder(SymbolState& st, OrderIndex order_idx) noexcept {
     return;
   }
   o.level = st.book.index_of(o.price);
+  // Whether this is a new level or an existing one decides Added vs Changed.
+  // Every other path in the engine already reports it that way; hardcoding Added
+  // would tell a market data consumer a level had appeared when it was already
+  // there, which would make a consumer's L2 book wrong.
+  const bool was_empty = st.book.level_at(o.level).empty();
   if (!st.book.add_to_queue(order_idx)) {
     remove_order(st, order_idx, CancelReason::ClientRequest, ts_of(o.arrival_seq));
     return;
   }
-  emit_delta(st, o.level, UpdateAction::Added);
+  emit_delta(st, o.level, was_empty ? UpdateAction::Added : UpdateAction::Changed);
 }
 
 Book& Engine::book_of(SymbolState& st, const Order& order) noexcept {
@@ -972,6 +983,54 @@ std::uint64_t Engine::state_hash() const noexcept {
     mix(st.trade_count);
   }
   return h;
+}
+
+std::vector<std::string> Engine::book_digest() const {
+  std::vector<std::string> out;
+  for (const std::unique_ptr<SymbolState>& up : states_) {
+    const SymbolState& st = *up;
+    // Two passes so every buy is emitted before every sell, matching the order
+    // the reference engine uses.
+    for (int side_i = 0; side_i < 2; ++side_i) {
+      const Side side = side_i == 0 ? Side::Buy : Side::Sell;
+      // Walk only occupied levels. The grid can be tens of thousands of ticks
+      // wide and this runs after every operation in the differential test, so
+      // scanning it in full would dominate the run.
+      for (LevelIndex lvl = st.book.lowest_occupied(); lvl != kNullLevel;
+           lvl = st.book.next_occupied_index(lvl)) {
+        // Filter by side: a level holds one side, but without this every order
+        // would be emitted in both the buy and the sell pass.
+        if (st.book.level_at(lvl).side != side) {
+          continue;
+        }
+        for (OrderIndex cur = st.book.level_at(lvl).head; cur != kNullOrder;
+             cur = st.arena[cur].next) {
+          const Order& o = st.arena[cur];
+          std::string line;
+          line.reserve(96);
+          line += std::to_string(st.symbol_id.value);
+          line += ' ';
+          line += (side == Side::Buy ? "buy" : "sell");
+          line += ' ';
+          line += std::to_string(st.book.price_of(lvl).value);
+          line += ' ';
+          line += std::to_string(o.order_id.value);
+          line += ' ';
+          line += std::to_string(o.total_qty.value);
+          line += ' ';
+          line += std::to_string(o.filled_qty.value);
+          line += ' ';
+          line += std::to_string(o.leaves_qty.value);
+          line += ' ';
+          line += std::to_string(static_cast<int>(o.type));
+          line += ' ';
+          line += std::to_string(static_cast<int>(o.tif));
+          out.push_back(std::move(line));
+        }
+      }
+    }
+  }
+  return out;
 }
 
 bool Engine::check_invariants(std::string_view* error) const noexcept {

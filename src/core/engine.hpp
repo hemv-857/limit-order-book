@@ -259,6 +259,16 @@ class Engine {
   [[nodiscard]] std::uint64_t state_hash() const noexcept;
   [[nodiscard]] bool check_invariants(std::string_view* error) const noexcept;
 
+  /// Canonical, pointer-free rendering of all resting liquidity: symbol, side,
+  /// price, order id, total, filled, leaves, order type, TIF -- in price order
+  /// and then queue (priority) order.
+  ///
+  /// This is the comparison surface for the differential test. It is a text
+  /// format rather than a hash so that a failure names the order that differs
+  /// instead of just reporting two unequal digests. The reference engine produces
+  /// byte-identical output for the same input.
+  [[nodiscard]] std::vector<std::string> book_digest() const;
+
   [[nodiscard]] const Book& book(SymbolId symbol) const noexcept;
   [[nodiscard]] const Book& stop_buy_book(SymbolId symbol) const noexcept;
   [[nodiscard]] const Book& stop_sell_book(SymbolId symbol) const noexcept;
