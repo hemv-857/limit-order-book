@@ -187,8 +187,27 @@ and its box ticked **here in this file**.
       **Not done:** segment rotation, fsync policy, and snapshots. Recovery today
       replays the whole log from genesis, which is O(journal) and fine for a
       correctness baseline but not for a restart SLA.
-- [ ] **M4 — Engine runtime.** SPSC rings (documented memory ordering), sequencer,
-      sharded single-threaded engines, pinning, backoff, graceful drain, TSan.
+- [~] **M4 — Engine runtime.** `src/runtime`: lock-free SPSC ring with the
+      memory ordering argued in the header, sequencer (gap-free global stamps +
+      shard routing), and a sharded single-threaded host with graceful drain.
+      **Done and TSan-clean.** Two bugs found while building it, both in the
+      host:
+      - **Shutdown could lose acknowledged orders.** Draining was a bool and the
+        in-flight count a separate atomic, so `drain()` could set the flag, a
+        worker could observe zero in flight *before* a concurrent submit
+        incremented it, exit, and leave that submit pushing into a queue nobody
+        would read. Both are now one atomic word per shard, so "am I accepting?"
+        and "count me in flight" cannot interleave.
+      - **Wrong book addressed.** Each `Engine` numbers its own symbols from
+        zero, but routing used the *global* `SymbolId`, so shard 1's only symbol
+        lived at local id 0 and every request for global id 1 read an empty book.
+        The host now keeps an explicit global-to-local map.
+      **Not done:** CPU pinning (macOS has no `pthread_setaffinity_np`; needs a
+      Linux-only path and cannot be verified on this host). Backoff is a plain
+      yield on the idle path rather than an exponential scheme — the queue is
+      empty for microseconds at a time in steady state, so a backoff would cost
+      latency and buy nothing. Real adaptive backoff needs a saturation
+      measurement, which is M8.
 - [ ] **M5 — Gateway & protocol.** Wire codec, framing, session state machine,
       reactor interface (epoll + kqueue), partial I/O, slow-consumer policy,
       heartbeat/timeout, market data publisher with snapshot+increments.

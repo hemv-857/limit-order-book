@@ -9,6 +9,11 @@ needs from the outside world is injected.
 
 ```
 clients ──TCP──> [Gateway] ──SPSC──> [Sequencer/Journal] ──> [Matching Engine]
+                                    │                            │
+                                    │  gap-free Sequence,         │ one thread per
+                                    │  timestamp, shard = sym % N │ shard, own book
+                                    ▼                            ▼
+                              SpscRing<Envelope> ──> [Shard 0] [Shard 1] … [Shard N-1]
                                                                     │
                                 fills/acks/rejects/market data <───┘ ──> [Publisher]
 ```
@@ -170,3 +175,34 @@ architecture for each is in `docs/PLAN.md` §2 and the interfaces they will need
 are already visible in the core: `state_hash()` for a snapshot digest, a flat
 `Event` for the journal and the feed, and injected `Timestamp`/`Sequence` for a
 replay to be bit-identical.
+
+## Concurrency model
+
+There is exactly one rule: **all activity for a symbol happens on one thread.**
+A shard owns its `Engine` exclusively and no engine is ever touched by two
+threads, so the matching engine itself needs no synchronisation and stays
+allocation-free, lock-free and deterministic. Concurrency lives entirely in the
+queues between threads.
+
+Three pieces, and what each one guarantees:
+
+**`SpscRing<T, Capacity>`** (`src/runtime/spsc_ring.hpp`) — one producer, one
+consumer, no locks. The header argues the memory ordering edge by edge; the
+short version is that the two index stores are release and the two cross-thread
+loads are acquire, while the slot accesses themselves are relaxed because the
+index pair already orders them. The indices are padded onto separate cache lines,
+without which the two threads invalidate each other's line on every operation.
+
+**`Sequencer`** — stamps each request with a gap-free, globally increasing
+`Sequence` and a matching `Timestamp`, and routes by `symbol % shard_count`. It
+does *not* serialise anything beyond the stamp: shards apply concurrently, so a
+lower `Sequence` can be applied after a higher one in a different shard. The
+stamp exists so a reader can *detect* that, not to impose a global order.
+
+**`ShardedEngineHost`** — owns the shards, their threads, and the graceful
+drain. Draining has one hard requirement: an order the gateway has acknowledged
+must not be lost. That forced the shutdown flag and the in-flight count to live
+in the *same* atomic word per shard. With them separate there is a real window —
+`drain()` sets the flag, the worker reads an in-flight count of zero before a
+concurrent submit increments it, exits, and the submit then pushes into a queue
+nobody will ever read.
