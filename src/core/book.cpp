@@ -173,13 +173,63 @@ void Book::remove_from_queue(OrderIndex idx) noexcept {
   if (lv.empty()) {
     set_occupied(li, false);
     --active_levels_;
+    // Side-aware: the bitmap is shared, and a plain scan could re-point an
+    // extreme at a level holding the opposite side.
     if (best_bid_ == li) {
-      best_bid_ = prev_occupied(static_cast<std::size_t>(li));
+      best_bid_ = find_bid_below(static_cast<std::size_t>(li));
     }
     if (best_ask_ == li) {
-      best_ask_ = next_occupied(static_cast<std::size_t>(li));
+      best_ask_ = find_ask_above(static_cast<std::size_t>(li));
     }
   }
+}
+
+LevelIndex Book::find_bid_below(std::size_t idx) const noexcept {
+  if (idx == 0) {
+    return kNullLevel;
+  }
+  std::size_t pos = idx;
+  while (pos > 0) {
+    --pos;
+    const std::size_t word = pos / 64U;
+    // Mask off everything at or above `pos` within this word.
+    const unsigned bit = static_cast<unsigned>(pos % 64U);
+    std::uint64_t w = occupied_[word] & bits_below(bit);
+    while (w != 0) {
+      const unsigned msb = 63U - static_cast<unsigned>(__builtin_clzll(w));
+      const std::size_t i = (word * 64U) + msb;
+      if (levels_[i].side == Side::Buy) {
+        return static_cast<LevelIndex>(i);
+      }
+      // Occupied by the other side: keep looking below it.
+      w &= ~(1ULL << msb);
+    }
+    if (word == 0) {
+      break;
+    }
+    pos = word * 64U;  // continue into the previous word
+  }
+  return kNullLevel;
+}
+
+LevelIndex Book::find_ask_above(std::size_t idx) const noexcept {
+  std::size_t pos = idx + 1U;
+  while (pos < domain_) {
+    const std::size_t word = pos / 64U;
+    const unsigned bit = static_cast<unsigned>(pos % 64U);
+    std::uint64_t w = occupied_[word] & bits_from(bit);
+    while (w != 0) {
+      const unsigned ctz = static_cast<unsigned>(__builtin_ctzll(w));
+      const std::size_t i = (word * 64U) + ctz;
+      if (levels_[i].side == Side::Sell) {
+        return static_cast<LevelIndex>(i);
+      }
+      // Occupied by the other side: keep looking above it.
+      w &= w - 1U;
+    }
+    pos = (word + 1U) * 64U;
+  }
+  return kNullLevel;
 }
 
 void Book::reduce_level(LevelIndex idx, Quantity qty) noexcept {

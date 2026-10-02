@@ -16,7 +16,7 @@ how it was found, and what remains. Milestone checkboxes are in
 | M1 — core types, order book, zero-allocation proof | **Done** |
 | M2a — order types, TIFs, STP, risk, stops, replace | **Done** |
 | M2b — randomised invariant probe | **Done** |
-| M2c — reference engine + differential test | **Built, not passing** |
+| M2c — reference engine + differential test | **Built, not passing; cause open** |
 | M3 — journal, snapshots, recovery | Not started |
 | M4 — engine runtime, SPSC pipeline | Not started |
 | M5 — gateway, wire protocol, market data | Not started |
@@ -161,15 +161,44 @@ built so far.
 Both are exactly the class of defect the unit tests and invariants could not
 reach: individually plausible, only wrong when read as a stream.
 
-**The differential test does not yet pass.** The two engines still diverge in the
-`plain` scenario around op 486: a FOK buy sweeps levels 16, 17, ... in the
-production engine but 16, 22, ... in the reference, and the engine's resulting
-book is left **crossed** (bid 17x3 against ask 17x3). A crossed book is a
-serious defect -- it means a trade printed where the opposite side was resting.
-The harness is committed, still built, and reproduces it on demand with
-`LOB_DIFF_OPS=20000`; the two tests are marked `DISABLED_` rather than left
-failing, and the open divergence is documented at the call site. Diagnosing it
-properly is the next piece of work.
+**The differential test does not yet pass.** The two engines still diverge, and
+two divergences were observed:
+
+1. `plain`, around op 486: a FOK buy sweeps levels 16, 17, ... in the production
+   engine but 16, 22, ... in the reference, and the engine's resulting book is
+   left **crossed** (bid 17x3 against ask 17x3).
+2. `stp_cancel_oldest`, around op 1495, and a multi-seed sweep that stalls on
+   at least one seed.
+
+A crossed book is a serious defect -- it means a trade printed where the
+opposite side was resting -- so this is not cosmetic and it is not finished.
+
+**Root cause is not established, and the two candidate fixes below are
+unverified.** The obvious suspect is that the level-occupancy bitmap is shared by
+both sides, so the side-agnostic `next/prev_occupied_index` walks can step onto a
+level holding the opposite side. That would be wrong in two places: refreshing
+`best_bid_`/`best_ask_`, and the FOK availability pre-check (which could count ask
+liquidity while checking a sell FOK). Both are now routed through side-aware
+`find_bid_below` / `find_ask_above` scans.
+
+**However: attempts to reproduce either defect as a unit test failed.** With the
+fix reverted, the equivalent unit tests still passed, and the crossed-book
+configuration could not be constructed by hand at all -- in a non-crossed book no
+ask can sit below the best bid, so a plain bitmap scan cannot reach an
+ask-level that way. That makes the crossed book, most likely, a *consequence* of
+some earlier divergence rather than the cause, or evidence of a third defect that
+has not been found.
+
+So: the scans are strictly narrowing (they can only skip a level the old code
+would have wrongly counted) and are kept as hardening, but they are **not**
+claimed to fix the divergence. No regression test is claimed for them, because
+none was shown to fail without the change. The real cause remains open.
+
+The harness is committed, still built, and reproduces the divergences on demand
+with `LOB_DIFF_OPS=<n>`; the two differential tests are `DISABLED_` rather than
+left failing, and the open state is documented at the call site. Isolating the
+cause is the next piece of work, and it should start by dumping both books
+immediately before the first divergent operation.
 
 Building the reference also found four bugs in the *reference itself*, which is
 the expected yield and a useful sign the harness has teeth: an aggressor was

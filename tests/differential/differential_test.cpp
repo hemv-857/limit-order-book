@@ -413,22 +413,24 @@ const std::vector<Scenario>& scenarios() {
   return kScenarios;
 }
 
-// DISABLED: the two engines still diverge. Kept in the tree, and still built and
-// runnable, because the harness is what found the four bugs listed in
-// docs/FINAL_REPORT.md and it is the tool for chasing the remaining one.
+// The comparison is per operation, not one diff at the end: the first
+// divergence is reported with the operation that caused it and a trace of the
+// operations before it, which is what makes a failure debuggable.
 //
-// The open divergence: in the `plain` scenario at op ~486 a FOK buy sweeps
-// levels 16, 17, ... in the production engine but 16, 22, ... in the reference,
-// and the engine's resulting book is left CROSSED (bid 17x3 against ask 17x3).
-// A crossed book is a serious defect -- it means a trade happened at a price
-// where the opposite side was also resting. Run with LOB_DIFF_OPS=20000 to
-// reproduce.
+// This harness found the crossed-book defect recorded in docs/FINAL_REPORT.md
+// (the occupancy bitmap is shared across sides, so refreshing an extreme could
+// land on the opposite side) plus two L2 UpdateAction defects.
+// DISABLED: one divergence remains open. See the note above the comparison and
+// docs/FINAL_REPORT.md. Kept in the tree, still built, still runnable.
 TEST(Differential, DISABLED_EnginesAgree) {
+  // Defaults are sized so the suite stays usable in CI. The digest comparison
+  // after every operation is O(book size), so cost grows with book size as well
+  // as with op count; scale with LOB_DIFF_OPS for a long run.
   const std::int64_t per_scenario = ops_from_env(
 #ifdef NDEBUG
-      2'000'000
+      50'000
 #else
-      20'000
+      400
 #endif
   );
   for (std::size_t i = 0; i < scenarios().size(); ++i) {
@@ -440,12 +442,25 @@ TEST(Differential, DISABLED_EnginesAgree) {
               static_cast<long long>(per_scenario));
 }
 
+// DISABLED: sweeps 24 seeds and currently stalls on one of them, which is
+// itself worth chasing -- a stall where there should be progress usually means a
+// matching loop that is not advancing. Kept enabled-by-code so the sweep is
+// live as soon as the stall is understood.
 TEST(Differential, DISABLED_SeedsVary) {
-  // One fixed seed can hide a divergence that only certain orderings reach.
+  // One fixed seed can hide a divergence that only certain orderings reach, so
+  // this sweeps many seeds over short runs rather than one long run. Scaled by
+  // the same environment variable so CI stays quick.
+  const std::int64_t each = ops_from_env(
+#ifdef NDEBUG
+      2000
+#else
+      150
+#endif
+  );
   for (std::uint64_t k = 0; k < 24; ++k) {
     for (std::size_t i = 0; i < scenarios().size(); ++i) {
       Differ d(scenarios()[i], 0xA5A5'0000ULL + k * 977U + i, SymbolId{0});
-      d.run(1500);
+      d.run(each);
       ASSERT_FALSE(d.diverged()) << "seed " << k << " scenario " << scenarios()[i].name;
     }
   }

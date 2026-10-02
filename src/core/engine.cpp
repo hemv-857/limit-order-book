@@ -224,16 +224,22 @@ void Engine::handle_new_order(SymbolState& st, NewOrderRequest request,
 
   // ---- FOK: prove the liquidity exists before emitting any fill ----
   if (request.tif == TimeInForce::FOK) {
+    // Walk with the side-aware scans. The occupancy bitmap is shared by both
+    // sides, so the side-agnostic next/prev_occupied_index can step onto a level
+    // holding the *opposite* side and count its quantity as available -- which
+    // would let an FOK order through on liquidity it cannot actually trade
+    // against.
     std::int64_t available = 0;
-    for (LevelIndex lvl = request.side == Side::Buy ? st.book.best_ask_level()
-                                                    : st.book.best_bid_level();
-         lvl != kNullLevel; lvl = request.side == Side::Buy ? st.book.next_occupied_index(lvl)
-                                                            : st.book.prev_occupied_index(lvl)) {
+    LevelIndex lvl =
+        request.side == Side::Buy ? st.book.best_ask_level() : st.book.best_bid_level();
+    while (lvl != kNullLevel) {
       const Price lp = st.book.price_of(lvl);
       if (request.type != OrderType::Market && !crosses(request.side, request.price, lp)) {
         break;
       }
       available += st.book.level_at(lvl).aggregate_qty.value;
+      lvl = request.side == Side::Buy ? st.book.find_ask_above(static_cast<std::size_t>(lvl))
+                                      : st.book.find_bid_below(static_cast<std::size_t>(lvl));
     }
     if (available < request.quantity.value) {
       fail_new(st, request, RejectCode::FokInsufficientLiquidity, counts_as_acceptance);

@@ -249,9 +249,25 @@ class Book {
 
   void set_occupied(LevelIndex idx, bool occupied) noexcept;
   /// Nearest occupied level strictly below / above `idx`, or kNullLevel.
+  ///
+  /// Side-agnostic: the bitmap marks a level occupied regardless of which side
+  /// it holds. Use the side-aware scans below when maintaining an extreme.
   [[nodiscard]] LevelIndex prev_occupied(std::size_t idx) const noexcept;
   [[nodiscard]] LevelIndex next_occupied(std::size_t idx) const noexcept;
 
+  /// Nearest occupied level *holding the given side* strictly below / above
+  /// `idx`.
+  ///
+  /// The occupancy bitmap is shared by both sides, so a plain bitmap scan can
+  /// return a level holding the opposite side. Using one of those to re-point
+  /// best_bid_ or best_ask_ makes an aggressor match against the wrong side,
+  /// which leaves the book crossed -- a trade printing where the opposite side
+  /// was resting. These are the only correct way to refresh an extreme.
+ public:
+  [[nodiscard]] LevelIndex find_bid_below(std::size_t idx) const noexcept;
+  [[nodiscard]] LevelIndex find_ask_above(std::size_t idx) const noexcept;
+
+ private:
   SymbolConfig cfg_;
   std::int64_t min_price_{0};
   std::int64_t max_price_{0};

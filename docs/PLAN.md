@@ -171,10 +171,15 @@ and its box ticked **here in this file**.
       canonical book digest after *every* operation (`tests/differential`).
       **Built and running; does not yet agree.** It found two real L2-stream
       defects in the production engine (rest_remainder hardcoding `Added`, and a
-      filled maker hardcoding `Removed`) and four bugs in the reference itself.
-      One divergence remains: a FOK multi-level sweep leaves the production book
-      crossed. Tests are `DISABLED_` with the divergence documented at the call
-      site, not silently dropped.
+      filled maker hardcoding `Removed`) and four bugs in the reference itself,
+      all fixed with regression tests.
+      Divergences that remain, cause **not** established: a crossed book after a
+      FOK sweep in `plain`, a disagreement in `stp_cancel_oldest`, and a stall in
+      the multi-seed sweep. The leading suspect -- a shared, side-agnostic
+      occupancy bitmap -- was hardened with side-aware scans, but that fix is
+      **unverified**: equivalent unit tests pass with it reverted, so it is not
+      claimed as the cause. Tests are `DISABLED_` with the open state documented,
+      not silently dropped.
 - [ ] **M3 — Journal & recovery.** WAL framing with CRC32C, segment rotation,
       fsync policy, snapshots, replay, torn-tail handling, state-hash equality.
 - [ ] **M4 — Engine runtime.** SPSC rings (documented memory ordering), sequencer,
