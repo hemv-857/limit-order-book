@@ -147,16 +147,20 @@ jobs:
           key: deps-${{ runner.os }}-gcc-${{ hashFiles('cmake/Dependencies.cmake') }}
           restore-keys: deps-${{ runner.os }}-gcc-
       - name: Build the fuzz targets
+        # The release preset does not enable -fsanitize=fuzzer, so the targets were
+        # never defined and the build failed with "unknown target 'fuzz_codec'".
         run: |
-          cmake --preset release
-          cmake --build --preset release -j --target fuzz_codec fuzz_journal fuzz_engine
+          # libFuzzer is a clang runtime; this runner's default gcc has none, so the
+          # check in fuzz/CMakeLists.txt failed and the targets were never defined.
+          cmake --preset fuzz -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          cmake --build --preset fuzz -j --target fuzz_codec fuzz_journal fuzz_engine
       - name: Confirm the entry points exist
         # If the runtime does not link, these binaries are absent and the job must
         # fail loudly rather than silently pass having fuzzed nothing.
         run: |
           set -euo pipefail
           for t in codec journal engine; do
-            test -x "build/release/bin/fuzz_${t}" || {
+            test -x "build/fuzz/bin/fuzz_${t}" || {
               echo "::error::fuzz_${t} was not built; libFuzzer is unavailable"
               exit 1
             }
@@ -170,7 +174,7 @@ jobs:
             mkdir -p "fuzz/corpus/${t}"
             # corpus/ is committed; a crash artifact is written next to it so it
             # can be attached and reduced like any other testcase.
-            "build/release/bin/fuzz_${t}" "fuzz/corpus/${t}" \
+            "build/fuzz/bin/fuzz_${t}" "fuzz/corpus/${t}" \
               -max_total_time="${FUZZ_SECONDS}" -max_len=4096 -print_final_stats=1
           done
       - name: Upload crash artifacts

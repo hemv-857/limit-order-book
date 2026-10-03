@@ -67,6 +67,17 @@
       }
     },
     {
+      "name": "fuzz",
+      "inherits": "base",
+      "displayName": "Release + libFuzzer",
+      "binaryDir": "${sourceDir}/build/fuzz",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "LOB_SANITIZER": "none",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O1 -g -DNDEBUG"
+      }
+    },
+    {
       "name": "release-portable",
       "inherits": "base",
       "displayName": "Release without -march=native (for reproducible binaries)",
@@ -81,6 +92,7 @@
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
+    { "name": "fuzz", "configurePreset": "fuzz" },
     { "name": "asan-ubsan", "configurePreset": "asan-ubsan" },
     { "name": "tsan", "configurePreset": "tsan" },
     { "name": "coverage", "configurePreset": "coverage" },

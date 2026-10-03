@@ -209,7 +209,7 @@ TEST(Journal, TruncatedTailIsDiscardedAndEarlierRecordsSurvive) {
 
 TEST(Journal, CorruptPayloadIsDetectedByCrc) {
   std::string bytes = to_bytes({rec_new(1, OrderId{1}, Side::Buy, Price{100}, Quantity{1})});
-  bytes[14] ^= 0xFF;  // flip a bit inside the payload
+  bytes[14] = static_cast<char>(bytes[14] ^ 0xFF);  // flip a bit inside the payload
   std::size_t seen = 0;
   const ReplayReport rep = replay(bytes, [&seen](const JournalRecord&) { ++seen; });
   EXPECT_TRUE(rep.truncated);
@@ -218,7 +218,7 @@ TEST(Journal, CorruptPayloadIsDetectedByCrc) {
 
 TEST(Journal, CorruptLengthIsRejected) {
   std::string bytes = to_bytes({rec_new(1, OrderId{1}, Side::Buy, Price{100}, Quantity{1})});
-  bytes[5] = 0xFF;  // absurd payload length
+  bytes[5] = static_cast<char>(0xFF);  // absurd payload length
   std::size_t seen = 0;
   const ReplayReport rep = replay(bytes, [&seen](const JournalRecord&) { ++seen; });
   EXPECT_TRUE(rep.truncated);
