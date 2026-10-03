@@ -219,8 +219,8 @@ TEST(InvariantProbe, MixedStreamKeepsEveryInvariant) {
             static_cast<unsigned long long>(ss->accepted_qty),
             static_cast<unsigned long long>(ss->filled_qty),
             static_cast<unsigned long long>(ss->removed_qty),
-            engine.book(SymbolId{0}).total_resting_qty().value,
-            engine.stop_buy_book(SymbolId{0}).total_resting_qty().value,
+            static_cast<long long>(engine.book(SymbolId{0}).total_resting_qty().value),
+            static_cast<long long>(engine.stop_buy_book(SymbolId{0}).total_resting_qty().value),
             static_cast<unsigned long long>(ss->trade_count));
         ADD_FAILURE() << describe(engine);
         return;
