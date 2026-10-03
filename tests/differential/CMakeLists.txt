@@ -8,8 +8,18 @@ target_link_libraries(test_differential PRIVATE lob_core lob_reference GTest::gt
                                             lob_warnings)
 gtest_discover_tests(test_differential)
 
-# The long differential run is a separate test with a generous timeout.
-
-add_test(NAME differential_long COMMAND test_differential
-                                --gtest_filter=Differential.EnginesAgree)
-set_tests_properties(differential_long PROPERTIES TIMEOUT 1800)
+# The long differential run: the same scenarios at a depth that can actually
+# find a rare divergence. Without LOB_DIFF_OPS this re-ran the default depth,
+# which made it a slower copy of Differential.EnginesAgree rather than a
+# distinct test.
+#
+# Optimised builds only. In debug this takes ~12 minutes, and it runs once per
+# preset, so leaving it everywhere would add hours to CI to re-prove the same
+# thing the release run already covers.
+if(CMAKE_BUILD_TYPE MATCHES "RelWithDebInfo|Release")
+  add_test(NAME differential_long COMMAND test_differential
+                                  --gtest_filter=Differential.EnginesAgree)
+  set_tests_properties(differential_long PROPERTIES
+                       TIMEOUT 3600
+                       ENVIRONMENT "LOB_DIFF_OPS=5000000")
+endif()
