@@ -30,6 +30,7 @@
 #include "gateway/reactor.hpp"
 #include "gateway/session.hpp"
 #include "gateway/write_queue.hpp"
+#include "journal/journal.hpp"
 #include "runtime/runtime.hpp"
 
 #include <atomic>
@@ -49,6 +50,12 @@ struct VenueConfig {
   std::size_t shards = 2;
   SessionConfig session{};
   MarketDataConfig market_data{};
+  /// Where to journal accepted requests. Empty means no journal, which is only
+  /// sensible for a throwaway process: without it a restart loses everything.
+  std::string journal_path;
+  /// Rebuild the book by replaying `journal_path` before serving. The replay reads
+  /// the file *before* the writer truncates it, so recovery and appending compose.
+  bool recover_from_journal = false;
 };
 
 /// One live connection: its socket, its session state, and its market data state.
@@ -136,6 +143,20 @@ class Venue : public ReactorHandler {
   /// Ask the owning shard to report `symbol`'s touch. Non-blocking.
   void request_top_of_book(SymbolId symbol) noexcept;
 
+  /// Open the journal, optionally replaying it first. Called by listen_on().
+  bool open_journal();
+
+  /// Records appended to the journal. Zero when journalling is off.
+  [[nodiscard]] std::uint64_t journal_records() const noexcept {
+    return journal_.records_written();
+  }
+
+  /// False once a journal write has failed. The venue keeps serving, but recovery
+  /// from this process is no longer trustworthy and the operator must know.
+  [[nodiscard]] bool journal_healthy() const noexcept {
+    return journal_.healthy();
+  }
+
   [[nodiscard]] ShardedEngineHost& engine() noexcept {
     return engine_;
   }
@@ -146,6 +167,8 @@ class Venue : public ReactorHandler {
  private:
   void handle_message(VenueConnection& conn, const protocol::Inbound& message);
   bool submit_to_engine(const protocol::Inbound& message);
+  /// Stamp and submit one request, leaving the result in scratch_record_.
+  bool routed_body(const protocol::Inbound& message);
   void flush(VenueConnection& conn);
   void close_connection(VenueConnection& conn, std::string_view why);
   void pump_snapshots();
@@ -171,6 +194,9 @@ class Venue : public ReactorHandler {
   /// Connections closed during a pump, removed after the iteration rather than
   /// during it.
   std::vector<VenueConnection*> to_close_;
+  JournalWriter journal_;
+  /// Reused so journalling an accepted request does not allocate per request.
+  JournalRecord scratch_record_;
   std::unordered_map<std::uint64_t, VenueConnection> connections_;
 };
 

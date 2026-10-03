@@ -20,7 +20,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 
 namespace lob {
@@ -44,6 +46,10 @@ Venue::~Venue() {
 
 void Venue::shutdown() {
   stop();
+  // Close the journal first so the log is fsynced even if a later step misbehaves.
+  // This is what makes a *graceful* restart lossless; a crash can still lose
+  // whatever was buffered when the process died.
+  (void)journal_.close();
   if (listen_fd_ >= 0) {
     ::close(listen_fd_);
     listen_fd_ = -1;
@@ -67,7 +73,95 @@ Connection* Venue::connection(std::uint64_t id) {
   return it == connections_.end() ? nullptr : &it->second;
 }
 
+namespace {
+
+/// Read a whole file. Used only at startup for recovery, so simplicity beats
+/// streaming.
+std::string read_file(const std::string& path) {
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return {};
+  }
+  std::string out;
+  std::array<char, 65536> buf{};
+  while (true) {
+    const ssize_t n = ::read(fd, buf.data(), buf.size());
+    if (n > 0) {
+      out.append(buf.data(), static_cast<std::size_t>(n));
+      continue;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    break;
+  }
+  ::close(fd);
+  return out;
+}
+
+}  // namespace
+
+bool Venue::open_journal() {
+  if (config_.journal_path.empty()) {
+    return false;
+  }
+  if (config_.recover_from_journal) {
+    // Replay BEFORE opening for append. The writer opens with O_TRUNC, so opening
+    // first would destroy the very log being recovered from.
+    const std::string bytes = read_file(config_.journal_path);
+    if (!bytes.empty()) {
+      // Replay through the shards rather than a standalone Engine: that is where
+      // the book lives, and submitting in journal order reproduces it exactly.
+      std::size_t applied = 0;
+      bool ok = true;
+      const ReplayReport report = replay(bytes, [&](const JournalRecord& r) {
+        bool sent = false;
+        switch (r.kind) {
+          case RecordKind::NewOrder:
+            sent = engine_.submit(r.new_order);
+            break;
+          case RecordKind::Cancel:
+            sent = engine_.submit(r.cancel);
+            break;
+          case RecordKind::Replace:
+            sent = engine_.submit(r.replace);
+            break;
+          case RecordKind::MassCancel:
+            sent = engine_.submit(r.mass_cancel);
+            break;
+          case RecordKind::Invalid:
+            break;
+        }
+        if (sent) {
+          ++applied;
+        } else {
+          ok = false;  // a shard refused: the recovered book would not match
+        }
+      });
+      // Recovery must *complete* before we serve: a half-applied book is worse than
+      // not starting. Wait for the shards to consume the replay, but do NOT drain():
+      // drain() joins the workers permanently, so the venue would come up with a
+      // correct book and no engine behind it to serve the next request.
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+      while (!engine_.idle()) {
+        if (std::chrono::steady_clock::now() > deadline) {
+          // NOLINTNEXTLINE(cert-err33-c) -- a failed log line is not actionable here.
+          std::fprintf(stderr, "venue: recovery did not settle within 30s\n");
+          return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      // NOLINTNEXTLINE(cert-err33-c) -- a failed log line is not actionable here.
+      std::fprintf(stderr, "venue: recovered %zu of %zu journal records%s%s\n", applied,
+                   report.records_applied, report.truncated ? " (torn tail)" : "",
+                   ok ? "" : " -- SHARD REFUSED A RECORD");
+    }
+  }
+  return journal_.open(config_.journal_path, config_.recover_from_journal);
+}
+
 std::uint16_t Venue::listen_on(std::uint16_t port) {
+  (void)open_journal();
   listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ < 0) {
     return 0;
@@ -238,30 +332,51 @@ void Venue::handle_message(VenueConnection& conn, const protocol::Inbound& messa
 }
 
 bool Venue::submit_to_engine(const protocol::Inbound& message) {
+  if (!routed_body(message)) {
+    return false;
+  }
+  // Journal only what the shard accepted. Note this claims nothing: submit()
+  // already takes and releases the shard's in-flight slot internally, and claiming
+  // again here left the count permanently elevated, so drain never completed.
+  if (journal_.is_open()) {
+    (void)journal_.append(scratch_record_);
+  }
+  return true;
+}
+
+bool Venue::routed_body(const protocol::Inbound& message) {
   switch (message.type) {
     case protocol::MessageType::NewOrder: {
       NewOrderRequest r = message.new_order;
       // Sequence and timestamp are the gateway's to assign, never the client's.
       r.seq = sequencer_.next_sequence();
       r.ts = sequencer_.next_timestamp();
+      scratch_record_.kind = RecordKind::NewOrder;
+      scratch_record_.new_order = r;
       return engine_.submit(r);
     }
     case protocol::MessageType::Cancel: {
       CancelRequest r = message.cancel;
       r.seq = sequencer_.next_sequence();
       r.ts = sequencer_.next_timestamp();
+      scratch_record_.kind = RecordKind::Cancel;
+      scratch_record_.cancel = r;
       return engine_.submit(r);
     }
     case protocol::MessageType::Replace: {
       ReplaceRequest r = message.replace;
       r.seq = sequencer_.next_sequence();
       r.ts = sequencer_.next_timestamp();
+      scratch_record_.kind = RecordKind::Replace;
+      scratch_record_.replace = r;
       return engine_.submit(r);
     }
     case protocol::MessageType::MassCancel: {
       MassCancelRequest r = message.mass_cancel;
       r.seq = sequencer_.next_sequence();
       r.ts = sequencer_.next_timestamp();
+      scratch_record_.kind = RecordKind::MassCancel;
+      scratch_record_.mass_cancel = r;
       return engine_.submit(r);
     }
     default:

@@ -3,7 +3,11 @@
 #include "util/crc32c.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstring>
+
+#include <fcntl.h>
+#include <unistd.h>
 #include <functional>
 
 namespace lob {
@@ -273,6 +277,126 @@ ReplayReport replay(std::string_view bytes, const std::function<void(const Journ
   }
   rep.bytes_consumed = p;
   return rep;
+}
+
+// ---------------------------------------------------------------------------
+// JournalWriter
+// ---------------------------------------------------------------------------
+
+namespace {
+/// Batch size before an automatic flush. Large enough that the write syscall is
+/// not on the hot path, small enough that a graceful shutdown rarely has a large
+/// tail to lose.
+constexpr std::size_t kFlushThreshold = 64UL * 1024UL;
+}  // namespace
+
+JournalWriter::~JournalWriter() {
+  if (fd_ >= 0) {
+    (void)close();
+  }
+}
+
+JournalWriter::JournalWriter(JournalWriter&& other) noexcept
+    : fd_(other.fd_),
+      buffer_(std::move(other.buffer_)),
+      written_(other.written_),
+      bytes_(other.bytes_),
+      healthy_(other.healthy_) {
+  other.fd_ = -1;
+  other.healthy_ = true;
+}
+
+JournalWriter& JournalWriter::operator=(JournalWriter&& other) noexcept {
+  if (this != &other) {
+    if (fd_ >= 0) {
+      (void)close();
+    }
+    fd_ = other.fd_;
+    buffer_ = std::move(other.buffer_);
+    written_ = other.written_;
+    bytes_ = other.bytes_;
+    healthy_ = other.healthy_;
+    other.fd_ = -1;
+    other.healthy_ = true;
+  }
+  return *this;
+}
+
+bool JournalWriter::open(const std::string& path, bool append) {
+  if (fd_ >= 0) {
+    (void)close();
+  }
+  // Append, not truncate, when recovering: truncating here would erase the very log
+  // that was just replayed, so a second crash would recover nothing at all. A torn
+  // tail is not a reason to discard the good prefix -- replay already stops at the
+  // first bad record, and the next append simply lands after it.
+  //
+  // Starting fresh (append == false) truncates, because then no replay happened and
+  // an existing file is stale by definition.
+  const int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (append ? O_APPEND : O_TRUNC);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open() is variadic.
+  fd_ = ::open(path.c_str(), flags, 0644);
+  if (fd_ < 0) {
+    healthy_ = false;
+    return false;
+  }
+  buffer_.clear();
+  buffer_.reserve(kFlushThreshold + 256U);
+  healthy_ = true;
+  written_ = 0;
+  bytes_ = 0;
+  return true;
+}
+
+bool JournalWriter::append(const JournalRecord& record) {
+  if (fd_ < 0) {
+    return false;
+  }
+  encode_record(record, buffer_);
+  ++written_;
+  if (buffer_.size() >= kFlushThreshold) {
+    return flush();
+  }
+  return true;
+}
+
+bool JournalWriter::flush() {
+  if (fd_ < 0 || buffer_.empty()) {
+    return healthy_;
+  }
+  std::size_t offset = 0;
+  while (offset < buffer_.size()) {
+    const ssize_t n = ::write(fd_, buffer_.data() + offset, buffer_.size() - offset);
+    if (n > 0) {
+      offset += static_cast<std::size_t>(n);
+      continue;
+    }
+    // A short write is progress; anything else is a real failure.
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    healthy_ = false;
+    return false;
+  }
+  bytes_ += buffer_.size();
+  buffer_.clear();
+  return true;
+}
+
+bool JournalWriter::close() {
+  if (fd_ < 0) {
+    return healthy_;
+  }
+  const bool flushed = flush();
+  // fsync on close, not on every write: this is what makes a *graceful* restart
+  // lossless. A crash still loses whatever the page cache had not taken.
+  if (flushed) {
+    healthy_ = (::fsync(fd_) == 0) && healthy_;
+  }
+  ::close(fd_);
+  fd_ = -1;
+  buffer_.clear();
+  return healthy_;
 }
 
 ReplayReport replay_into_engine(std::string_view bytes, Engine& engine) {
