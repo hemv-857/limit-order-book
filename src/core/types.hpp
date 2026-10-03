@@ -171,6 +171,14 @@ struct Checked {
 /// a negative-rate instrument), and multiplying two negative operands as
 /// unsigned would produce a value near 2^128 and falsely reject a perfectly
 /// ordinary positive notional.
+// __int128 is a GCC/Clang extension, not standard C++, so -Wpedantic rejects it.
+// It is used deliberately here: it is the only way to detect signed multiplication
+// overflow without UB, and the Linux GCC builds compile with -Werror -Wpedantic.
+// Scoped to this one function rather than project-wide.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 [[nodiscard]] inline Checked<std::int64_t> checked_mul(std::int64_t a, std::int64_t b) noexcept {
   const __int128 product = static_cast<__int128>(a) * static_cast<__int128>(b);
   if (product > static_cast<__int128>(std::numeric_limits<std::int64_t>::max()) ||
@@ -179,6 +187,9 @@ struct Checked {
   }
   return Checked<std::int64_t>{static_cast<std::int64_t>(product), true};
 }
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 /// Add two 64-bit quantities, reporting overflow instead of wrapping.
 [[nodiscard]] inline Checked<std::int64_t> checked_add(std::int64_t a, std::int64_t b) noexcept {
