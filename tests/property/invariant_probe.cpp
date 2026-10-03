@@ -73,13 +73,17 @@ std::string describe(const Engine& engine) {
       const Order& o = book[cur];
       if (o.filled_qty.value + o.leaves_qty.value != o.total_qty.value) {
         char buf[256];
-        std::snprintf(buf, sizeof(buf),
-                      " id=%llu price=%lld total=%lld filled=%lld leaves=%lld display=%lld "
-                      "level=%u side=%d tif=%d type=%d\n",
-                      static_cast<unsigned long long>(o.order_id.value), o.price.value,
-                      o.total_qty.value, o.filled_qty.value, o.leaves_qty.value,
-                      o.display_qty.value, lvl, static_cast<int>(o.side), static_cast<int>(o.tif),
-                      static_cast<int>(o.type));
+        std::snprintf(
+            buf, sizeof(buf),
+            " id=%llu price=%lld total=%lld filled=%lld leaves=%lld display=%lld "
+            "level=%u side=%d tif=%d type=%d\n",
+            // %lld needs exactly long long. int64_t is long long on macOS
+            // but long on Linux, so this compiles locally and fails on GCC.
+            static_cast<unsigned long long>(o.order_id.value),
+            static_cast<long long>(o.price.value), static_cast<long long>(o.total_qty.value),
+            static_cast<long long>(o.filled_qty.value), static_cast<long long>(o.leaves_qty.value),
+            static_cast<long long>(o.display_qty.value), lvl, static_cast<int>(o.side),
+            static_cast<int>(o.tif), static_cast<int>(o.type));
         out += buf;
       }
     }

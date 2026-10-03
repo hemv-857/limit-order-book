@@ -146,6 +146,13 @@ jobs:
           path: build/release/_deps
           key: deps-${{ runner.os }}-gcc-${{ hashFiles('cmake/Dependencies.cmake') }}
           restore-keys: deps-${{ runner.os }}-gcc-
+      - name: Install clang and compiler-rt
+        # libFuzzer lives in compiler-rt, which the runner's clang does not ship.
+        # Without it the probe links no runtime, reports "libFuzzer unavailable",
+        # and the fuzz targets are never defined.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-rt-dev
       - name: Build the fuzz targets
         # The release preset does not enable -fsanitize=fuzzer, so the targets were
         # never defined and the build failed with "unknown target 'fuzz_codec'".
