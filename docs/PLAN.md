@@ -337,8 +337,46 @@ and its box ticked **here in this file**.
       Still to do: `lobctl`, `replay`, and `loadgen` -- the last belongs with M8,
       since it is the benchmark harness. `bookviz` is speculative and dropped: a
       visualisation of a book the existing dump path already produces.
-- [ ] **M7 — Fuzzing & sanitizers.** Fuzz targets for protocol decoder, journal
-      reader, engine input; committed corpus; ASan/UBSan/TSan clean on the suite.
+- [x] **M7 — Fuzzing.** Three targets in `fuzz/targets.cpp` — the wire decoder,
+      the journal reader, and the engine — written as **plain functions with no
+      dependency on any fuzzing runtime**, because libFuzzer's runtime does not
+      exist on this project's default toolchain (deviation D-2). Two drivers over
+      one set of targets:
+      - `fuzz/fuzz_{codec,journal,engine}.cc` — libFuzzer entry points, built only
+        where the runtime links (GCC/Clang on Linux).
+      - `tests/fuzz/fuzz_test.cpp` — a portable driver over a committed corpus,
+        systematic mutation, random inputs, and *every truncation of every seed*.
+        This is the driver that actually runs here and in CI, under ASan/UBSan.
+      `./scripts/fuzz.sh [preset]` picks whichever is available.
+      The engine target asserts the **full** invariant set after **every**
+      operation, not just that it survives: the bugs worth finding are the
+      self-consistent-but-wrong states — a zero-quantity order resting in the book,
+      a crossed book — and a harness that only looks for crashes cannot see them.
+
+      **The harness was verified to have teeth**, which is the part that matters:
+      reintroducing the zero-quantity replace bug makes it abort with
+      `zero-quantity order queued`, and restoring the fix makes it clean. A fuzzer
+      nobody has seen fail is indistinguishable from a fuzzer that does nothing.
+      Getting there took four corrections to the *target*, each of which had been
+      silently neutering it:
+      - It generated enums and quantities uniformly, so nearly every order was
+        rejected on validation, nothing rested, nothing traded, and it explored
+        nothing.
+      - It read operations from the input bytes, so a 33-byte corpus entry produced
+        **one** operation. The input is now a seed for a PRNG that runs a fixed
+        600-operation stream.
+      - It relied on random prices colliding, which post-only rejects and the
+        open-order cap made rare. Half the time it now deliberately places an
+        order across the last one, because fills are what make later replaces
+        interesting.
+      - It never cleared events, so a long run tripped the engine's
+        buffer-overflow assert — the target misusing the engine, not the engine
+        misbehaving.
+      Detection of the known bug is probabilistic: measured at roughly one run in
+      1,500–3,000 random inputs, so the budget sits at 3,000 and the number is
+      recorded here rather than left as folklore. Explicit scenarios for the
+      already-found bug classes are kept as well, but they are honest coverage,
+      not a substitute for that measurement.
 - [ ] **M8 — Performance.** Google Benchmark suite, profiling, hotspot fixes,
       measured before/after, results recorded.
 - [ ] **M9 — Docs & CI.** README, ARCHITECTURE, PROTOCOL, MATCHING_RULES,
