@@ -524,7 +524,10 @@ TEST(VenueRecovery, ATornTailRecoversEverythingBeforeIt) {
     bytes.resize(full_size - 5);  // mid-record tear
     const int fd = ::open(path.c_str(), O_WRONLY | O_TRUNC);
     ASSERT_GE(fd, 0);
-    (void)::write(fd, bytes.data(), bytes.size());
+    // Checked rather than (void)-cast: write() is warn_unused_result and GCC
+    // rejects the discarded form outright, so a short write here would otherwise
+    // go unnoticed and the test would silently stop testing what it claims.
+    ASSERT_EQ(::write(fd, bytes.data(), bytes.size()), static_cast<ssize_t>(bytes.size()));
     ::close(fd);
 
     JournalledVenue second(path, true, one_symbol());
