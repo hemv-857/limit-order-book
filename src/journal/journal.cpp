@@ -208,6 +208,7 @@ bool decode_payload(RecordKind kind, std::string_view p, JournalRecord& out) {
 }
 
 void encode_record(const JournalRecord& rec, std::vector<std::uint8_t>& out) {
+  const std::size_t start = out.size();
   std::vector<std::uint8_t> body;
   encode_payload(rec, body);
 
@@ -215,8 +216,15 @@ void encode_record(const JournalRecord& rec, std::vector<std::uint8_t>& out) {
   put_u8(out, static_cast<std::uint8_t>(rec.kind));
   put_u32(out, static_cast<std::uint32_t>(body.size()));
   out.insert(out.end(), body.begin(), body.end());
-  // CRC covers kind, length and payload -- everything after the magic.
-  put_u32(out, crc32c(out.data() + 4, out.size() - 4, 0));
+  // CRC covers kind, length and payload -- everything after this record's magic.
+  //
+  // Relative to `start`, NOT to offset 0 of `out`. Offsets from 0 are only correct
+  // when the record happens to be the first thing in the buffer, which is true for
+  // a single-record encode and false for every record a journal ever writes. The
+  // symptom is a log whose first record replays and whose every later record is
+  // silently discarded as corrupt, so recovery truncates to one record and loses
+  // everything after it.
+  put_u32(out, crc32c(out.data() + start + 4, out.size() - start - 4, 0));
 }
 
 ReplayReport replay(std::string_view bytes, const std::function<void(const JournalRecord&)>& sink) {

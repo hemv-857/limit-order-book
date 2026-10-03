@@ -60,6 +60,49 @@ std::string to_bytes(const std::vector<JournalRecord>& rs) {
   return out;
 }
 
+/// Slice-by-eight must agree with the byte-at-a-time definition for every length,
+/// not just the ones a frame happens to use. The slice loop and the tail loop are
+/// different code paths, and a CRC that disagrees on one of them corrupts frames
+/// silently -- there is no error, only a reader that rejects good data.
+TEST(Crc32c, SliceByEightAgreesWithTheDefinitionAtEveryLength) {
+  std::vector<std::uint8_t> data(256);
+  for (std::size_t i = 0; i < data.size(); ++i) {
+    data[i] = static_cast<std::uint8_t>(i * 37U + 11U);
+  }
+  // Reference: the definition, one byte at a time, written out longhand.
+  auto reference = [&data](std::size_t len) {
+    std::uint32_t c = 0xFFFFFFFFU;
+    for (std::size_t i = 0; i < len; ++i) {
+      c ^= data[i];
+      for (int k = 0; k < 8; ++k) {
+        c = (c & 1U) != 0U ? (c >> 1U) ^ 0x82F63B78U : c >> 1U;
+      }
+    }
+    return ~c;
+  };
+
+  for (std::size_t len = 0; len <= data.size(); ++len) {
+    EXPECT_EQ(crc32c(data.data(), len, 0), reference(len)) << "length " << len;
+  }
+}
+
+/// And the seed must compose the same way, since chunked callers rely on it.
+TEST(Crc32c, SeedChainingMatchesOneShot) {
+  std::vector<std::uint8_t> data(200);
+  for (std::size_t i = 0; i < data.size(); ++i) {
+    data[i] = static_cast<std::uint8_t>(i * 91U + 7U);
+  }
+  const std::uint32_t one_shot = crc32c(data.data(), data.size(), 0);
+  std::uint32_t chained = 0;
+  std::size_t offset = 0;
+  for (const std::size_t chunk : {1U, 7U, 8U, 9U, 64U, 111U}) {
+    chained = crc32c(data.data() + offset, chunk, chained);
+    offset += chunk;
+  }
+  chained = crc32c(data.data() + offset, data.size() - offset, chained);
+  EXPECT_EQ(chained, one_shot);
+}
+
 TEST(Crc32c, MatchesKnownVector) {
   // The standard CRC-32C check value for "123456789".
   const char* s = "123456789";
@@ -185,6 +228,36 @@ TEST(Journal, CorruptLengthIsRejected) {
 // The test that justifies the whole approach: because the engine is
 // deterministic, replaying the request log must rebuild a bit-identical book.
 // If this ever fails, recovery is silently producing a different venue.
+/// Regression: encode_record computed its CRC from offset 0 of the destination
+/// buffer, which is only the start of the record when it is the *first* thing in
+/// that buffer. A journal is a stream of records appended to one buffer, so every
+/// record after the first got a CRC computed over the wrong bytes and replay
+/// silently stopped at record one. The earlier tests missed it because their
+/// helper cleared the buffer between records, so every record did start at zero.
+TEST(Journal, EveryRecordInOneBufferHasItsOwnValidCrc) {
+  constexpr std::size_t kRecords = 500;
+  std::vector<std::uint8_t> one_buffer;
+  for (std::uint64_t i = 1; i <= kRecords; ++i) {
+    encode_record(rec_new(i, OrderId{i}, i % 2 == 0 ? Side::Buy : Side::Sell,
+                          Price{static_cast<std::int64_t>(100 + i % 7)},
+                          Quantity{static_cast<std::int64_t>(i % 5 + 1)}),
+                  one_buffer);
+  }
+  const std::string bytes(reinterpret_cast<const char*>(one_buffer.data()), one_buffer.size());
+
+  std::size_t seen = 0;
+  const ReplayReport report = replay(bytes, [&seen](const JournalRecord& r) {
+    EXPECT_EQ(r.new_order.order_id.value, seen + 1) << "record " << seen << " out of order";
+    ++seen;
+  });
+
+  EXPECT_FALSE(report.truncated) << "a journal written by encode_record must replay cleanly";
+  EXPECT_EQ(report.records_applied, kRecords)
+      << "records after the first were discarded as corrupt";
+  EXPECT_EQ(seen, kRecords);
+  EXPECT_EQ(report.bytes_consumed, one_buffer.size());
+}
+
 TEST(Journal, ReplayRebuildsAnIdenticalBook) {
   std::mt19937_64 rng(12345);
   std::uniform_int_distribution<int> side(0, 1);

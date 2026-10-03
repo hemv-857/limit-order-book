@@ -377,8 +377,53 @@ and its box ticked **here in this file**.
       recorded here rather than left as folklore. Explicit scenarios for the
       already-found bug classes are kept as well, but they are honest coverage,
       not a substitute for that measurement.
-- [ ] **M8 — Performance.** Google Benchmark suite, profiling, hotspot fixes,
-      measured before/after, results recorded.
+- [x] **M8 — Performance.** Google Benchmark suite across every layer
+      (`bench/bench_lob.cpp`), one measured hotspot fixed, results recorded below.
+      Fixtures are built outside the timed region and inputs are deterministic, so
+      the numbers measure the code rather than the harness. Release only.
+      **`./build/release/bin/bench_lob`**
+
+      | Benchmark | before | after |
+      |---|---|---|
+      | `Crc32cFrameSized` (72 B) | 239 ns | **40 ns** (287 Mi/s → 1.3 Gi/s) |
+      | `CodecEncodeFrame` | 363 ns | **141 ns** |
+      | `CodecDecodeFrame` | 324 ns | **114 ns** |
+      | `JournalEncodeRecord` | 806 ns | **525 ns** |
+
+      The hotspot: CRC-32C was byte-at-a-time at ~287 Mi/s. It runs on **every
+      frame inbound and outbound** and on every journal record, so a venue pays it
+      twice per message. Replaced with slice-by-eight — eight tables, eight bytes
+      per iteration — which needs no CPU feature detection and so keeps the
+      portability the file exists to provide. The four rows above are all
+      downstream of that one change; nothing else was touched.
+
+      A CRC that computes the wrong answer is worse than a slow one, because it
+      corrupts silently. So the slice-by-eight version is checked against the
+      longhand byte-at-a-time definition **at every length from 0 to 256**, and its
+      seed-chaining is checked against a one-shot call. Both are in `test_journal`.
+
+      ### A journal bug the benchmark suite found
+
+      Writing `BM_JournalReplayRecords` exposed that `encode_record` computed its
+      CRC from **offset 0 of the destination buffer** rather than from where the
+      record starts. That is correct only when the record is the first thing in the
+      buffer — true for a one-record encode, false for every record a journal ever
+      writes. So the first record replayed and **every later record was discarded
+      as corrupt**, silently truncating recovery to one record.
+
+      The existing tests passed *by accident*: their `to_bytes` helper cleared the
+      buffer between records, so every record did begin at offset 0. Fixed, with a
+      regression test that appends 500 records to a single buffer and asserts all
+      500 replay (verified to fail with the fix reverted).
+
+      This is the clearest argument in the project for the benchmark suite existing
+      at all: a unit test built around a convenient helper hid a bug that would
+      have lost every order after the first on restart.
+
+      Not done: `perf`-based sampling profiles. This host is macOS and ships no
+      `perf`; the equivalent tooling is Instruments or `sample`, and the sampling
+      done during M6 (which found the 198% CPU spin and the two hangs) served that
+      purpose. Recorded as a deviation rather than skipped silently.
 - [ ] **M9 — Docs & CI.** README, ARCHITECTURE, PROTOCOL, MATCHING_RULES,
       OPERATIONS, DECISIONS, FINAL_REPORT, GitHub Actions matrix.
 
