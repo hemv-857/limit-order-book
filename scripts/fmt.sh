@@ -16,9 +16,15 @@ ACTION=(-i)
 [[ "${1:-}" == "--check" ]] && ACTION=(--dry-run --Werror)
 
 cd "$ROOT"
-mapfile -t FILES < <(find include src tools tests bench fuzz \
-                     -type f \( -name '*.hpp' -o -name '*.cpp' -o -name '*.h' \) \
-                     2>/dev/null | sort)
+# Not mapfile: that is a bash 4 builtin and macOS still ships bash 3.2, so CI
+# died with "mapfile: command not found" (exit 127) before formatting anything.
+# A read loop works on both.
+FILES=()
+while IFS= read -r line; do
+  FILES+=("$line")
+done < <(find include src tools tests bench fuzz \
+         -type f \( -name '*.hpp' -o -name '*.cpp' -o -name '*.h' \) \
+         2>/dev/null | sort)
 if [[ ${#FILES[@]} -eq 0 ]]; then
   echo "no sources found"
   exit 0

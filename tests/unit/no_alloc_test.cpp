@@ -35,9 +35,20 @@ SymbolConfig alloc_config() {
 // Guard against a vacuous guard: if the replacement operator new were not
 // actually wired in, every "no allocation" assertion below would pass trivially
 // and prove nothing at all.
+namespace {
+// A global the optimiser cannot reason about, so an escape hatch for values that
+// must be forced to materialise.
+volatile const void* g_sink = nullptr;
+}  // namespace
+
 TEST(NoAlloc, GuardActuallyObservesAllocations) {
   alloc_guard::enable();
   auto* v = new std::vector<int>(1024);
+  // The allocation has to be observable or it is not required to happen: at -O3
+  // the new/delete pair is elided outright when the pointer is never read, so the
+  // guard saw zero allocations and this guard-against-a-vacuous-guard test failed
+  // in release while passing in debug.
+  g_sink = v->data();
   const std::size_t seen = alloc_guard::count();
   alloc_guard::disable();
   EXPECT_GE(seen, 1u) << "allocation guard is not counting; every other test here is meaningless";

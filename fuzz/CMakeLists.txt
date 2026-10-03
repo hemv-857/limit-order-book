@@ -8,10 +8,16 @@ target_link_libraries(lob_fuzz_targets PUBLIC lob_protocol lob_journal)
 # Coverage-guided drivers, built only when the toolchain can link libFuzzer. They
 # are the better driver where available; the portable one is what always runs.
 include(CheckCXXSourceCompiles)
+# The flag has to be a *link* option as well as a compile flag. With it only on the
+# compile line the probe compiles fine and then fails to link on the missing
+# LLVMFuzzerTestOneInput, so the check reports "no libFuzzer" on a toolchain that
+# has it and the targets are never defined.
 set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
+set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=fuzzer")
 check_cxx_source_compiles("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}"
                           LOB_HAVE_LIBFUZZER)
 unset(CMAKE_REQUIRED_FLAGS)
+unset(CMAKE_REQUIRED_LINK_OPTIONS)
 
 if(LOB_HAVE_LIBFUZZER)
   foreach(target codec journal engine)

@@ -21,7 +21,11 @@ cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
       >/dev/null
 
 cd "$BUILD_DIR"
-mapfile -t FILES < <(find "$ROOT/src" "$ROOT/tools" -type f -name '*.cpp' | sort)
+# Not mapfile: bash 4 builtin, absent from the bash 3.2 that macOS ships.
+FILES=()
+while IFS= read -r line; do
+  FILES+=("$line")
+done < <(find "$ROOT/src" "$ROOT/tools" -type f -name '*.cpp' | sort)
 if [[ ${#FILES[@]} -eq 0 ]]; then
   echo "no sources found"
   exit 0
@@ -33,7 +37,10 @@ fi
 # forward them; this keeps the script portable instead of hardcoding a macOS
 # SDK path that would break the Linux CI leg.
 CXX_BIN="${CXX:-c++}"
-mapfile -t SYSINCLUDES < <("$CXX_BIN" -E -x c++ /dev/null -v 2>&1 \
+SYSINCLUDES=()
+while IFS= read -r line; do
+  SYSINCLUDES+=("$line")
+done < <("$CXX_BIN" -E -x c++ /dev/null -v 2>&1 \
   | sed -n '/#include <\.\.\.> search starts here:/,/End of search list\./p' \
   | sed -e '1d' -e '$d' | tr -d ' ' | grep '^/' || true)
 
