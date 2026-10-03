@@ -1,0 +1,5 @@
+add_library(lob_runtime STATIC runtime.cpp)
+target_include_directories(lob_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(lob_runtime PUBLIC lob_core)
+find_package(Threads REQUIRED)
+target_link_libraries(lob_runtime PUBLIC Threads::Threads)

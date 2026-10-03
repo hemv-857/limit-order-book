@@ -22,7 +22,10 @@ fuzz/corpus/**/oom-*
 *.tmp
 
 # Runtime artefacts
-runtime/
+# Anchored to the repo root on purpose. Unanchored "runtime/" also matched
+# src/runtime/ and tests/runtime/, which silenced an entire source directory out
+# of the repository -- CI failed to configure because src/runtime/ was not there.
+/runtime/
 *.journal
 *.snapshot
 *.log
