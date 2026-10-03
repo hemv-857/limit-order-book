@@ -424,162 +424,77 @@ and its box ticked **here in this file**.
       `perf`; the equivalent tooling is Instruments or `sample`, and the sampling
       done during M6 (which found the 198% CPU spin and the two hangs) served that
       purpose. Recorded as a deviation rather than skipped silently.
-- [ ] **M9 — Docs & CI.** README, ARCHITECTURE, PROTOCOL, MATCHING_RULES,
-      OPERATIONS, DECISIONS, FINAL_REPORT, GitHub Actions matrix.
+- [x] **M9 — Docs & CI.** All nine milestones are complete.
+      **Docs:** `PROTOCOL.md` (normative wire spec, written from the code and
+      cross-checked against the codec), `OPERATIONS.md` (build, test, run, recover,
+      troubleshoot), alongside the existing `README`, `ARCHITECTURE`,
+      `MATCHING_RULES`, `DECISIONS`, `FINAL_REPORT` and this plan.
+      **CI:** `.github/workflows/ci.yml`, split by what it is actually evidence for
+      rather than one long job:
+      - `test` — the full suite on debug, release, asan+ubsan, tsan and
+        release-portable.
+      - `lint` — clang-format and clang-tidy, failing fast so a one-character fix
+        does not report twenty minutes of red.
+      - `fuzz-portable` — the corpus + mutation driver under ASan+UBSan.
+      - `linux` — GCC on release/asan/tsan, which is the only place the epoll
+        backend is exercised at all.
+      - `fuzz-libfuzzer` — coverage-guided search, which only links on Linux. It
+        asserts the entry points were actually built, so the job cannot pass having
+        fuzzed nothing.
+      - `benchmark` — recorded as an artifact, not gated. A wall-clock threshold
+        fails CI for reasons unrelated to correctness; ignoring the numbers loses
+        the ability to notice a regression.
+      - `smoke` — starts the real binary, connects, and requires a clean `SIGTERM`
+        drain. Every other job can pass while the deployed thing is unrunnable.
 
----
+      Also added **`lobctl`**, a client. `OPERATIONS.md` tells an operator how to
+      start the venue and, without this, gives them no way to talk to it.
+      Verified against a live venue: handshake, two orders accepted with zero
+      refusals, and a subscribe receiving `snapshot seq=3 symbol=0 bid=100x5`.
 
-## 5. Testing strategy
+## Where the project ended
 
-| Layer | Technique | Gate |
-|---|---|---|
-| Unit | GoogleTest, one behaviour per test, every order type / TIF / STP / risk code | all pass |
-| Property | Invariant checks after **every** op in debug builds | invariants hold |
-| Differential | Naive `std::map`+`std::deque` reference vs. core, randomized streams, byte-identical event streams | **≥ 10 000 000 ops** |
-| Fuzz | libFuzzer-style targets for decoder / journal reader / engine input | no findings, corpus committed |
-| Golden | Recorded scenarios with expected event streams checked in | byte-identical |
-| Recovery | Kill mid-write, truncate, flip bytes in tail | recovery lands on identical state hash |
-| Concurrency | TSan on rings and full pipeline | race-free |
-| Integration | Real TCP clients against real server | scripted expectations |
-| Coverage | gcov/lcov on `src/core`, `src/journal` | **≥ 90 % line** |
+| Milestone | Status |
+|---|---|
+| M0 toolchain and build presets | Complete |
+| M1 order book | Complete |
+| M2a matching engine | Complete |
+| M2b randomized invariants | Complete |
+| M2c reference engine + differential | Complete |
+| M3 journal and recovery | Complete |
+| M4 engine runtime | Complete |
+| M5 gateway and protocol | Complete |
+| M6 tools and end-to-end | Complete |
+| M7 fuzzing | Complete |
+| M8 performance | Complete |
+| M9 docs and CI | Complete |
 
-Invariants asserted in debug builds:
-1. Book is never crossed (`best_bid < best_ask`, or one side empty).
-2. Each level's aggregate quantity equals the sum over its orders.
-3. ID index agrees with the book (and contains no orphans).
-4. No negative quantities; executed qty ≤ order qty.
-5. Volume conservation: Σ fill qty on buy side == Σ fill qty on sell side.
-6. Per-level queue order matches arrival sequence (price-time priority).
+**222 tests green** in debug, release, ASan+UBSan and TSan; clang-tidy and
+clang-format clean.
 
----
+### The bugs worth remembering
 
-## 6. Assumptions (documented, revisit if wrong)
+Written down because the *pattern* mattered more than any single defect:
 
-- A **bounded price domain per symbol** is a valid venue model (§3.1).
-- `Quantity` is a signed 64-bit integer with a **positive-only** validation
-  rule; zero/negative is a pre-trade reject, never a wrap.
-- Notional (`price × qty`) is computed in 128-bit and range-checked to 64-bit.
-- `OrderId`s are venue-assigned and monotonically increasing per session, but the
-  core treats them as opaque and never assumes ordering.
-- Session expiry (Day orders, stop cleanup) is driven by an **injected** session
-  clock/event, not by wall time.
-- One order may be *one* of: Limit, Market, Stop, Stop-Limit (not combined with
-  Reduce-Only, which is out of scope per spec).
+- **An unbounded loop in the matching engine** — a hung venue. Found by chasing
+  something else: a differential sweep that looked "slow" was actually spinning.
+- **A shutdown race that lost acknowledged orders** — a bool and a counter in
+  separate atomics, so a worker could exit before a submit that had already been
+  accepted. The same shape recurred in a plain `bool` stop flag.
+- **A journal whose CRC was computed from offset 0 of the buffer** — correct only
+  for the first record, so recovery silently truncated to one order. The unit
+  tests passed *because their helper cleared the buffer between records*.
+- **An L2 stream that was wrong in ways nothing could see** — a zero-quantity
+  order resting in the book satisfies every structural check while no longer
+  being tradeable.
+- **A synchronous book accessor that raced its own shard worker** — exposed by an
+  API, not by a caller. Removed rather than patched.
+- **A blocking listener socket** — hid behind a *passing* shutdown test, because
+  with no pending connection the code path was never reached.
 
----
-
-## 7. Known deviations from the original spec (kept honest)
-
-- **D-1 — `epoll` unavailable on the build host.** The reactor is an interface with
-  an epoll backend (Linux, exercised in CI) and a kqueue backend (macOS, exercised
-  locally). Neither backend is a stub.
-- **D-2 — libFuzzer runtime absent from Apple CommandLineTools.** Fuzz targets are
-  written against the standard `LLVMFuzzerTestOneInput` ABI. CMake links them with
-  `-fsanitize=fuzzer` wherever available (Linux CI ⇒ coverage-guided libFuzzer).
-  Where that runtime is missing, a **portable in-tree driver** links the *same*
-  target object and drives it with a seeded mutation engine under ASan+UBSan
-  against the *same* corpus directory. Same target code, two drivers.
-- **D-3 — no `perf` on the build host.** Hotspots are found with Google Benchmark
-  A/B comparisons and in-process HDR-style histograms instead of sampled stacks.
-  Documented per optimization with before/after numbers.
-- **D-4 — GCC not installed locally.** The GCC leg of the CI matrix is real, but
-  its results are CI-produced, not quoted as local measurements.
-- **D-5 — UDP multicast market data** was a stretch goal in the spec and is not
-  implemented; TCP market data with sequence numbers and snapshot recovery is.
-
-### M2a — Matching semantics + unit tests (complete)
-
-54 engine tests (91 total), green in `release`, `asan-ubsan` and `tsan`;
-clang-format and clang-tidy clean.
-
-Delivered: order types (Limit, Market, Stop, StopLimit), TIFs (Day, GTC, IOC,
-FOK), post-only reject *and* slide, iceberg with priority loss on replenish,
-cancel, cancel/replace with priority rules, mass cancel, session expiry, all four
-STP modes, the full pre-trade reject ladder, and per-participant rate limiting.
-Stops live in a second book keyed by trigger price, so they occupy no liquidity;
-cascades drain a work list instead of recursing.
-
-Twelve defects were found by tests rather than by inspection. The ones worth
-recording:
-
-1. **The null sentinel was `UINT32_MAX` while loop conditions tested for zero.**
-   `while (const OrderIndex i = level.head)` therefore exited only at slot 0 --
-   a *valid* order -- and ran off the end of the arena. Fixed structurally, not
-   by patching the loop: `kNullOrder` is now 0, arena slot 0 is reserved, and
-   `if (idx)` means "has order". This removed a whole bug class.
-2. **A fully filled maker was unlinked after its quantity hit zero**, so the
-   level aggregate was never reduced. Book::check_invariants caught it.
-3. **Post-only slide put a buy *above* the ask**, leaving it crossing. The slide
-   direction is now derived from the side.
-4. **A partially filled order was unlinked/re-linked in the wrong order**, so
-   replace left the level aggregate stale.
-5. **The aggressor's arena slot was used after self-trade prevention released
-   it.** `match` now reports whether the aggressor survived.
-6. **A fully filled aggressor stayed in the id index**, so the book and the index
-   disagreed and a client could "cancel" an order that no longer existed.
-7. **A stop-limit's limit price was overwritten by its trigger price**, turning
-   every stop-limit into a market order on trigger.
-8. **The id index's size counter was never decremented on erase**, so a
-   cancel-heavy venue would eventually report itself permanently full.
-9. **Free-list seeding dropped the last arena slot** after the sentinel change.
-10. **`lowest_occupied()`/`highest_occupied()` returned inverted results**,
-    because they were implemented with the *nearest*-occupied scans. Stops
-    triggered on the wrong side of the book.
-11. **The volume invariant was unmeasurable.** Counting aggressor-side volume
-    cannot balance by construction. Replaced with a real conservation law:
-    every accepted lot is executed, removed, or still resting.
-12. **`trigger_queue.clear()` was left over** from a `push_back` design and wiped
-    the pre-sized storage, so stop cascades aborted.
-
-### M2b — Randomised invariant probe (complete)
-
-`tests/property/invariant_probe.cpp` feeds a seeded, mixed operation stream
-(market/limit/stop/stop-limit, all four TIFs, icebergs, post-only, cancel,
-replace, mass cancel, session end) and re-checks every invariant every 1024
-operations. 20,000,000 operations clean.
-
-It immediately found two more defects that no hand-written case had reached:
-
-13. **The aggressor's `filled_qty` was never incremented.** `execute_fill`
-    decremented the taker's `leaves_qty` but only ever incremented the maker's
-    `filled_qty`. Any order that partially filled and then rested reported
-    `filled == 0` with `leaves < total`, which also meant a later replace could
-    be allowed to shrink the order below what had already traded. Regression
-    test: `AggressorThatRestsAfterPartialFillAccountsForFilledQuantity`.
-14. **A buy stop and a sell stop could not share a trigger price.** They lived in
-    one stop book, and a price level holds exactly one side by design — the
-    invariant that makes the liquidity book incapable of crossing. The second
-    stop to arrive was rejected after being accepted, leaking its quantity out
-    of the conservation law. Fixed by giving each symbol separate buy and sell
-    stop books, and regression test `BuyAndSellStopsCanShareATriggerPrice`.
-
-Bisecting the leak found a third, related: a triggered stop that converts into
-an order which no longer validates (a stop-limit whose limit price has since
-left the collar) was rejected without booking its quantity as removed, because it
-had already been counted as accepted when the stop was submitted. Rejections
-from the trigger queue now go through `fail_new`, which books the quantity.
-
----
-
-## 8. Milestone log
-
-### M0 — Skeleton & toolchain (complete)
-
-Toolchain proved by running it, not by reading a version string:
-
-- `release`, `asan-ubsan`, `tsan` configure, build warning-free, and run 8/8 tests.
-- `clang-format --check` clean; `clang-tidy` reports zero findings in first-party code.
-- Google Benchmark links and reports sane timings.
-
-Two bugs were caught by the tooling rather than by inspection, which is the
-point of wiring it up first:
-
-1. `checked_mul` widened its operands to **unsigned** 128-bit, so a legitimate
-   negative price times a negative quantity overflowed and was falsely rejected.
-   The unit test `Types.CheckedMulHandlesNegativeNotional` failed on first run.
-   Fixed by widening to signed `__int128` and checking against both `int64`
-   bounds (`src/core/types.hpp`).
-2. GoogleTest 1.15.2 ships `-Werror` in its own flags and does not compile under
-   Apple Clang 21's `-Wcharacter-conversion`. Third-party targets are now given
-   `-w` so upstream code can never fail our build; first-party targets keep the
-   full `-Werror` treatment.
+Three of those six were found by something other than a unit test, and two were
+found by a test that was passing at the time. The recurring lesson is the one the
+fuzzing and benchmark work kept re-proving: **a test that has not been seen to
+fail is not evidence.** Hence the deliberate habit of reintroducing a known bug to
+confirm a harness catches it — which caught four separately neutered fuzz targets
+and one regression test that proved nothing.

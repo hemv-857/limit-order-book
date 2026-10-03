@@ -1,0 +1,271 @@
+# Every claim this project makes about correctness is checked here, on every push.
+#
+# The matrix is not ceremony. Two separate jobs exist because Apple Clang on macOS
+# and GCC on Linux find different bugs, and the two documented platform deviations
+# (no libFuzzer runtime, no epoll) can only be exercised on one host or the other.
+# A green macOS run is not evidence about GCC, and nothing here is evidence about
+# libFuzzer.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref: the full matrix is ~20 minutes and most
+# pushes are incremental.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Warnings are errors. A new warning must be a deliberate decision, not noise we
+  # grew to ignore.
+  CXXFLAGS: -Werror
+
+jobs:
+  # ---- the whole suite, on every preset -------------------------------------
+  # asan-ubsan and tsan are separate entries rather than flags on one job because
+  # they are slow enough that they must not be able to starve each other, and
+  # because a failure in one should not hide the state of the other.
+  test:
+    name: ${{ matrix.preset }}
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release, asan-ubsan, tsan, release-portable]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the repo-local toolchain
+        # bootstrap.sh installs ninja, clang-format and clang-tidy into .venv, so
+        # the cache key is the script itself plus the lock file: change how tools
+        # are installed and the cache invalidates.
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
+          restore-keys: venv-${{ runner.os }}-
+
+      - name: Bootstrap
+        run: ./scripts/bootstrap.sh
+
+      - name: Configure and build
+        run: |
+          source scripts/env.sh
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }} -j
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+
+  # ---- style and static analysis --------------------------------------------
+  # Cheap, and failing fast on them keeps a slow matrix from reporting twenty
+  # minutes of red for a one-character fix.
+  lint:
+    name: format and tidy
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
+          restore-keys: venv-${{ runner.os }}-
+      - run: ./scripts/bootstrap.sh
+      - name: clang-format
+        run: |
+          source scripts/env.sh
+          ./scripts/fmt.sh --check
+      - name: clang-tidy
+        run: |
+          source scripts/env.sh
+          ./scripts/tidy.sh
+
+  # ---- fuzzing --------------------------------------------------------------
+  # Runs on macOS with the portable driver under ASan+UBSan. The libFuzzer job
+  # below is where coverage-guided search happens.
+  fuzz-portable:
+    name: fuzz (portable driver, asan+ubsan)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
+          restore-keys: venv-${{ runner.os }}-
+      - run: ./scripts/bootstrap.sh
+      - name: Fuzz
+        run: |
+          source scripts/env.sh
+          ./scripts/fuzz.sh asan-ubsan
+
+  # ---- Linux: GCC, epoll, libFuzzer -----------------------------------------
+  # Everything this project's default macOS toolchain cannot check.
+  linux:
+    name: linux (gcc ${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [release, asan-ubsan, tsan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache CMake and FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/release/_deps
+            build/asan-ubsan/_deps
+            build/tsan/_deps
+          key: deps-${{ runner.os }}-gcc-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: deps-${{ runner.os }}-gcc-
+
+      - name: Configure and build
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }} -j
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+
+  # libFuzzer exists only here. Separated from the matrix above because it links a
+  # different set of binaries and needs its own timeout semantics.
+  fuzz-libfuzzer:
+    name: fuzz (libFuzzer)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache CMake and FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build/release/_deps
+          key: deps-${{ runner.os }}-gcc-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: deps-${{ runner.os }}-gcc-
+      - name: Build the fuzz targets
+        run: |
+          cmake --preset release
+          cmake --build --preset release -j --target fuzz_codec fuzz_journal fuzz_engine
+      - name: Confirm the entry points exist
+        # If the runtime does not link, these binaries are absent and the job must
+        # fail loudly rather than silently pass having fuzzed nothing.
+        run: |
+          set -euo pipefail
+          for t in codec journal engine; do
+            test -x "build/release/bin/fuzz_${t}" || {
+              echo "::error::fuzz_${t} was not built; libFuzzer is unavailable"
+              exit 1
+            }
+          done
+      - name: Fuzz
+        env:
+          FUZZ_SECONDS: 120
+        run: |
+          set -euo pipefail
+          for t in codec journal engine; do
+            mkdir -p "fuzz/corpus/${t}"
+            # corpus/ is committed; a crash artifact is written next to it so it
+            # can be attached and reduced like any other testcase.
+            "build/release/bin/fuzz_${t}" "fuzz/corpus/${t}" \
+              -max_total_time="${FUZZ_SECONDS}" -max_len=4096 -print_final_stats=1
+          done
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-artifacts
+          path: fuzz/crash-*
+          if-no-files-found: ignore
+
+  # ---- benchmarks -----------------------------------------------------------
+  # Recorded as an artifact rather than gated. A benchmark number is evidence for a
+  # human to read, not a pass/fail threshold: gating on wall-clock makes CI fail
+  # for reasons unrelated to correctness, and ignoring the numbers entirely loses
+  # the ability to notice a regression.
+  benchmark:
+    name: benchmarks
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
+          restore-keys: venv-${{ runner.os }}-
+      - run: ./scripts/bootstrap.sh
+      - name: Build and run
+        run: |
+          source scripts/env.sh
+          cmake --preset release
+          cmake --build --preset release -j
+          ./build/release/bin/bench_lob \
+            --benchmark_min_time=0.5s \
+            --benchmark_format=json \
+            --benchmark_out=bench.json
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench.json
+
+  # ---- the venue actually starts --------------------------------------------
+  # Every test above can pass while the binary is unrunnable. One smoke run that
+  # binds a port, serves a connection and shuts down on a signal is the cheapest
+  # possible proof that the thing people deploy is the thing the tests measured.
+  smoke:
+    name: venue smoke
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
+          restore-keys: venv-${{ runner.os }}-
+      - run: ./scripts/bootstrap.sh
+      - name: Build the venue
+        run: |
+          source scripts/env.sh
+          cmake --preset release
+          cmake --build --preset release -j --target venue
+      - name: Start, connect, shut down
+        run: |
+          set -euo pipefail
+          LOG="$(mktemp)"
+          ./build/release/bin/venue --port 0 --shards 2 --symbols 2 >"$LOG" 2>&1 &
+          VENUE=$!
+          # Always take the venue down, even if an assertion below fails, or the
+          # job hangs until the runner kills it.
+          trap 'kill -TERM $VENUE 2>/dev/null || true' EXIT
+
+          # Wait for the banner rather than sleeping a fixed amount: CI machines
+          # are noisy and a fixed sleep is a race that shows up as a flake nobody
+          # can reproduce.
+          for _ in $(seq 1 100); do
+            grep -q 'venue: listening' "$LOG" && break
+            kill -0 $VENUE 2>/dev/null || { echo "::error::venue exited on startup:"; cat "$LOG"; exit 1; }
+            sleep 0.1
+          done
+          grep -q 'venue: listening' "$LOG" || { echo "::error::no listen banner"; cat "$LOG"; exit 1; }
+
+          PORT="$(sed -n 's/.*127\.0\.0\.1:\([0-9]*\).*/\1/p' "$LOG" | head -1)"
+          test -n "$PORT" || { echo "::error::could not read the bound port"; exit 1; }
+
+          # Actually connect, so "it bound a port" is not mistaken for "it serves".
+          python3 -c "
+          import socket, sys
+          s = socket.create_connection(('127.0.0.1', $PORT), timeout=5)
+          s.sendall(b'LO\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00')
+          s.close()
+          "
+          sleep 0.5
+
+          kill -TERM $VENUE
+          wait $VENUE || { echo "::error::venue did not exit cleanly on SIGTERM"; cat "$LOG"; exit 1; }
+          grep -q 'venue: stopped' "$LOG" || { echo "::error::no shutdown summary"; cat "$LOG"; exit 1; }
+          cat "$LOG"
+          echo "venue started, served a connection, and drained cleanly"
