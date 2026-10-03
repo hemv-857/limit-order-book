@@ -292,42 +292,51 @@ and its box ticked **here in this file**.
       reactor cannot defend against.
       **M5 is complete.** Not wired together yet: there is no `main()` that
       accepts a socket, runs the reactor and joins the shards. That is M6.
-- [~] **M6 — Tools & e2e. The venue runs; one market data path still hangs.**
-      **Done:** `src/venue` wires codec, session machine, sharded engine, market
-      data publisher and reactor into one process, and `tests/e2e` drives it over
-      real TCP — 10 tests covering handshake, order flow, two clients trading,
-      unauthenticated refusal, garbage isolation, two symbols on two shards, a
-      1,200-order concurrent load leaving the book uncrossed, and three shutdown
-      tests.
-      **Shutdown was written first and tested first**, which is the lesson from the
-      previous attempt: a property the whole program depends on should be proven
-      before anything is layered on it. That immediately paid for itself — four
-      real bugs, all of which had hung every single test:
+- [x] **M6 — Tools & e2e. The venue runs end to end.**
+      `src/venue` wires codec, session machine, sharded engine, market data
+      publisher and reactor into one process; `tests/e2e` drives it over real TCP
+      with 11 tests: handshake, order flow, two clients trading, unauthenticated
+      refusal, garbage isolation, two symbols on two shards, a 1,200-order
+      concurrent load leaving the book uncrossed, a subscriber receiving a snapshot
+      and then increments, and three shutdown tests.
+      **Shutdown was written and tested first**, the lesson from the previous
+      attempt. That paid for itself immediately: five real bugs, each of which had
+      hung the entire file.
       - `listen_on` never set `O_NONBLOCK` on the listener, so `accept_ready()`'s
-        second `::accept()` blocked forever waiting for a connection that may never
-        arrive. The acceptor loop could not be stopped, let alone joined.
-      - `ShardedEngineHost`'s per-shard snapshot rings were never resized or
-        populated in the constructor, so `take_snapshots()` indexed an empty
-        vector. Out-of-bounds reads that present as a hang, not a crash.
+        second `::accept()` blocked forever. The first shutdown test still passed,
+        because with no pending connection `poll` never reported `POLLIN` and
+        `accept_ready()` was never called — a green test hiding a hang.
+      - The per-shard snapshot rings were never resized or populated, so
+        `take_snapshots()` indexed an empty vector. Out-of-bounds reads that
+        present as a hang, not a crash.
       - `VenueStats` counters were plain `uint64_t` written by the acceptor thread
         and read by anything watching. Now atomic.
       - `ShardedEngineHost::top_of_book()` read a shard's book directly from the
-        caller's thread — the exact race the whole shard design exists to prevent,
-        exposed by an API that invited it. **Removed**, not patched: reads now go
-        through the owning shard via the snapshot ring, and `Venue::top_of_book()`
-        returns the last answer that arrived under a lock.
-      TSan found the last two, which is the argument for running the e2e suite
-      under it rather than excluding sockets from the sanitized build.
-      **One test is DISABLED and the reason is specific:** `pump_market_data` does
-      not complete, so a subscriber never receives its feed. The publisher itself
-      is covered by 13 unit tests including a full snapshot-then-increments
-      reconstruction against a live engine, so the feed *logic* is sound; what is
-      unwired is the venue's path from the publisher's outbox to the subscriber's
-      socket. A venue that cannot stream market data is only half a venue, so this
-      is the next thing to fix.
-      Still to do: `lobctl`, `loadgen`, `replay`. `loadgen` belongs with M8 (it is
-      the benchmark harness) and `bookviz` is speculative — a visualisation of a
-      book the existing dump path already produces.
+        caller's thread — the exact race the shard design exists to prevent,
+        exposed by an API that invited it. **Removed**, not patched: a synchronous
+        accessor on a book another thread owns cannot be made safe. Reads go
+        through the owning shard over the snapshot ring.
+      - **The market data boundary was in the wrong sequence space.** Increments
+        carry the engine's internal event counter (from 1); the snapshot boundary
+        was seeded with the gateway sequencer's much larger number. Every
+        increment therefore looked stale and the entire feed was silently
+        suppressed — no error, no dropped counter, just a subscriber that never
+        saw anything move. Found only because the end-to-end test asserts on what
+        the client actually receives.
+      A sixth was in the tests, not the product: the test client used a blocking
+      socket, so `drain()` waited forever once the venue had sent everything it
+      had. Every earlier test never read a byte, which is exactly why it hid.
+      **`venue` binary** (`tools/venue_main.cpp`): parses arguments, binds, runs
+      until SIGINT/SIGTERM, prints counters on the way out. Deliberately thin --
+      every decision worth making lives in the library where it can be tested. The
+      signal handler only sets an atomic the run loop consults; it never touches
+      the reactor, because async-signal-context access to a live object is exactly
+      the sort of thing that works until it does not.
+      Verified by hand: binds an ephemeral port, serves a connection, and shuts
+      down cleanly on SIGTERM.
+      Still to do: `lobctl`, `replay`, and `loadgen` -- the last belongs with M8,
+      since it is the benchmark harness. `bookviz` is speculative and dropped: a
+      visualisation of a book the existing dump path already produces.
 - [ ] **M7 — Fuzzing & sanitizers.** Fuzz targets for protocol decoder, journal
       reader, engine input; committed corpus; ASan/UBSan/TSan clean on the suite.
 - [ ] **M8 — Performance.** Google Benchmark suite, profiling, hotspot fixes,

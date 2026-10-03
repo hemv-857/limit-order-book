@@ -14,11 +14,13 @@
 #include <gtest/gtest.h>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -201,6 +203,13 @@ class TestClient {
     if (::connect(fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
       std::abort();
     }
+    // Non-blocking, and it matters: drain() polls until a deadline, and on a
+    // blocking socket the read simply waits forever once the venue has sent
+    // everything it has. Every test that never read a byte hid this.
+    const int flags = ::fcntl(fd_, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
+      std::abort();
+    }
   }
   ~TestClient() {
     if (fd_ >= 0) {
@@ -236,6 +245,9 @@ class TestClient {
       if (n > 0) {
         out.append(buf, static_cast<std::size_t>(n));
         continue;
+      }
+      if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        break;  // the venue closed the connection
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
@@ -343,13 +355,7 @@ TEST(VenueE2E, TwoSymbolsLandOnDifferentShardsWithSeparateBooks) {
   EXPECT_FALSE(f.venue().top_of_book(SymbolId{1}).has_bid);
 }
 
-// DISABLED: hangs. The publisher itself is covered by 13 unit tests, including a
-// full snapshot-then-increments reconstruction against a live engine, so the feed
-// logic is sound; what is not yet working is the venue's wiring of it -- queued
-// bytes reaching a subscriber's socket through pump_market_data. Left visible and
-// documented rather than deleted, because a venue that cannot stream market data
-// is only half a venue.
-TEST(VenueE2E, DISABLED_ASubscribedClientGetsASnapshotThenIncrements) {
+TEST(VenueE2E, ASubscribedClientGetsASnapshotThenIncrements) {
   VenueFixture f({sym_cfg("XYZ")});
   TestClient trader(f.port());
   TestClient watcher(f.port());
