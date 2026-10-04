@@ -64,7 +64,10 @@ Reactor::~Reactor() {
 
 bool Reactor::manage(int fd, std::uint64_t connection_id) {
   struct epoll_event ev{};
-  ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+  // No EPOLLOUT here, exactly as the kqueue path arms no write filter. An
+  // always-armed EPOLLOUT makes every idle socket permanently writable, so
+  // epoll_wait returns immediately and poll_once() never reports "idle".
+  ev.events = EPOLLIN | EPOLLRDHUP;
   ev.data.fd = fd;
   if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) != 0) {
     return false;
@@ -192,10 +195,20 @@ int Reactor::poll_once(int timeout_ms) {
 #endif  // __linux__
 
 #ifdef __linux__
-void Reactor::set_write_interest(int, bool) {
-  // epoll has no separate write filter to toggle: readability and writability
-  // arrive in one mask, so there is nothing to arm or disarm.
+/// Arm or disarm EPOLLOUT. epoll does have a write interest, it just has no
+/// separate filter: toggling it means re-registering the fd with EPOLL_CTL_MOD
+/// and a different event mask. The previous no-op here was the reason
+/// PollOnAnIdleSocketReturnsWithoutEvents failed on Linux.
+// NOLINTBEGIN(readability-make-member-function-const) -- mutates the epoll set.
+void Reactor::set_write_interest(int fd, bool wanted) {
+  struct epoll_event ev{};
+  ev.events = EPOLLIN | EPOLLRDHUP | (wanted ? EPOLLOUT : 0U);
+  ev.data.fd = fd;
+  // ENOENT just means the connection was released between the call and here, which
+  // is the same benign case the kqueue path ignores.
+  (void)::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
 }
+// NOLINTEND(readability-make-member-function-const)
 #endif  // __linux__
 
 void Reactor::handle_readable(int fd) {

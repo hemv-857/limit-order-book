@@ -303,6 +303,30 @@ TEST(Reactor, PollOnAnIdleSocketReturnsWithoutEvents) {
   EXPECT_EQ(handler.closed_calls, 0);
 }
 
+// The other half of the idle-socket contract, and the one an always-armed
+// EPOLLOUT would break: once write interest is armed, a writable socket must
+// actually be reported. Without this, disarming write interest correctly would
+// simply mean outbound data never flushes on Linux and nothing would notice
+// until a venue sat there sending nothing.
+TEST(Reactor, WritableIsReportedOnceWriteInterestIsArmed) {
+  SocketPair pair;
+  RecordingHandler handler;
+  Reactor reactor(handler);
+  handler.connections_.emplace(
+      1, Connection{1, pair.server(), {}, {}, false, false, Session(1, SessionConfig{}, 0)});
+  ASSERT_TRUE(reactor.manage(pair.server(), 1));
+
+  // Disarmed by default, like the idle case.
+  EXPECT_EQ(reactor.poll_once(0), 0);
+
+  reactor.set_write_interest(pair.server(), true);
+  EXPECT_EQ(reactor.poll_once(50), 1) << "writable was never reported after arming";
+  EXPECT_GE(handler.writable_calls, 1);
+
+  reactor.set_write_interest(pair.server(), false);
+  EXPECT_EQ(reactor.poll_once(0), 0) << "writable still reported after disarming";
+}
+
 TEST(Reactor, ReleasedConnectionsAreNoLongerDispatched) {
   SocketPair pair;
   RecordingHandler handler;
