@@ -299,8 +299,8 @@ JournalWriter::~JournalWriter() {
 JournalWriter::JournalWriter(JournalWriter&& other) noexcept
     : fd_(other.fd_),
       buffer_(std::move(other.buffer_)),
-      written_(other.written_),
-      bytes_(other.bytes_),
+      written_(other.written_.load(std::memory_order_relaxed)),
+      bytes_(other.bytes_.load(std::memory_order_relaxed)),
       healthy_(other.healthy_) {
   other.fd_ = -1;
   other.healthy_ = true;
@@ -313,8 +313,8 @@ JournalWriter& JournalWriter::operator=(JournalWriter&& other) noexcept {
     }
     fd_ = other.fd_;
     buffer_ = std::move(other.buffer_);
-    written_ = other.written_;
-    bytes_ = other.bytes_;
+    written_.store(other.written_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    bytes_.store(other.bytes_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     healthy_ = other.healthy_;
     other.fd_ = -1;
     other.healthy_ = true;
@@ -343,8 +343,8 @@ bool JournalWriter::open(const std::string& path, bool append) {
   buffer_.clear();
   buffer_.reserve(kFlushThreshold + 256U);
   healthy_ = true;
-  written_ = 0;
-  bytes_ = 0;
+  written_.store(0, std::memory_order_relaxed);
+  bytes_.store(0, std::memory_order_relaxed);
   return true;
 }
 
@@ -353,7 +353,7 @@ bool JournalWriter::append(const JournalRecord& record) {
     return false;
   }
   encode_record(record, buffer_);
-  ++written_;
+  written_.fetch_add(1, std::memory_order_relaxed);
   if (buffer_.size() >= kFlushThreshold) {
     return flush();
   }

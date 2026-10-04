@@ -148,9 +148,15 @@ class ShardedEngineHost {
   /// by draining would come up with a correct book and no engine behind it.
   [[nodiscard]] bool idle() const noexcept {
     for (std::size_t i = 0; i < shards_.size(); ++i) {
-      if (!queues_[i]->empty()) {
-        return false;
-      }
+      // Only the gate, deliberately: it is the one word designed to be read from
+      // another thread. Checking the queue's empty() here looked equivalent but
+      // broke the SPSC contract -- empty() reads the consumer's tail_, and the
+      // shard worker is the consumer -- which TSan reported as a data race.
+      //
+      // The in-flight count covers queued *and* executing requests, since claim()
+      // increments before the push and the worker decrements after processing, so
+      // zero everywhere means everything submitted has been fully applied.
+      //
       // Bit 0 is the draining flag; everything above it counts in-flight requests.
       if ((gate_[i].load(std::memory_order_acquire) & ~std::uint64_t{1}) != 0U) {
         return false;

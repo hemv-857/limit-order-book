@@ -21,6 +21,7 @@
 
 #include "core/engine.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -116,18 +117,20 @@ class JournalWriter {
     return healthy_;
   }
 
+  // Atomic: the acceptor thread appends while an observer (a monitoring caller, a
+  // test) reads these. TSan flagged the plain read in records_written().
   [[nodiscard]] std::uint64_t records_written() const noexcept {
-    return written_;
+    return written_.load(std::memory_order_relaxed);
   }
   [[nodiscard]] std::uint64_t bytes_written() const noexcept {
-    return bytes_;
+    return bytes_.load(std::memory_order_relaxed);
   }
 
  private:
   int fd_ = -1;
   std::vector<std::uint8_t> buffer_;
-  std::uint64_t written_ = 0;
-  std::uint64_t bytes_ = 0;
+  std::atomic<std::uint64_t> written_{0};
+  std::atomic<std::uint64_t> bytes_{0};
   bool healthy_ = true;
 };
 
