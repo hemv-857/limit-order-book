@@ -248,8 +248,14 @@ void Venue::on_readable(Connection& raw) {
       return;
     }
     stats_.frames_decoded.fetch_add(1, std::memory_order_relaxed);
+    // handle_message can close the connection, which erases it from connections_
+    // and frees the very object `conn` refers to. Liveness therefore has to be
+    // checked through an id captured *before* the call: the previous guard read
+    // conn.id afterwards, which is a read of freed memory. ASan caught exactly
+    // that as a heap-use-after-free in __hash_table.
+    const std::uint64_t id = conn.id;
     handle_message(conn, *message);
-    if (!connections_.contains(conn.id)) {
+    if (!connections_.contains(id)) {
       return;  // the message closed it
     }
   }

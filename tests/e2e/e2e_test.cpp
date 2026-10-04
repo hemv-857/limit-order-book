@@ -238,6 +238,20 @@ class TestClient {
     send_bytes(reinterpret_cast<const char*>(buf.data()), buf.size());
   }
 
+  /// Several frames in one segment, so a close triggered by an early frame
+  /// happens while the venue still has unread bytes behind it.
+  void send_batch(const std::vector<protocol::Inbound>& messages) {
+    std::vector<std::uint8_t> buf;
+    for (const auto& m : messages) {
+      std::vector<std::uint8_t> part;
+      if (!protocol::encode(m, part)) {
+        std::abort();
+      }
+      buf.insert(buf.end(), part.begin(), part.end());
+    }
+    send_bytes(reinterpret_cast<const char*>(buf.data()), buf.size());
+  }
+
   void send_bytes(const char* data, std::size_t len) {
     std::size_t sent = 0;
     while (sent < len) {
@@ -690,6 +704,33 @@ TEST(VenueE2E, ASubscribedClientGetsASnapshotThenIncrements) {
   EXPECT_EQ(later.front().type, protocol::MessageType::MarketDataIncrement);
   // Strictly after the snapshot's sequence: the boundary must hold end to end.
   EXPECT_GT(later.front().increment.sequence, first.front().snapshot.sequence);
+}
+
+// Goodbye closes the connection from inside handle_message, while on_readable
+// still has the rest of the segment to walk. The guard that notices this used to
+// read conn.id -- from the object close_connection had just erased and freed --
+// which ASan reported as a heap-use-after-free in __hash_table.
+TEST(VenueE2E, AGoodbyeFollowedByMoreFramesInTheSameSegmentIsSafe) {
+  VenueFixture f({sym_cfg("XYZ")});
+  ASSERT_NE(f.port(), 0);
+  TestClient client(f.port());
+
+  protocol::Inbound bye;
+  bye.type = protocol::MessageType::Goodbye;
+  client.send_batch({bye, order(ParticipantId{0}, OrderId{1}, Side::Buy, Price{10}, Quantity{1}),
+                     order(ParticipantId{0}, OrderId{2}, Side::Buy, Price{11}, Quantity{2})});
+
+  ASSERT_TRUE(f.wait_for([&f] { return f.venue().stats().frames_decoded >= 1; }))
+      << "the venue never decoded the goodbye";
+
+  // The venue must still be healthy and serving: the freed connection took the
+  // acceptor's iteration with it if anything else was holding a reference.
+  TestClient second(f.port());
+  second.send(hello("s"));
+  second.send(auth("s", "t"));
+  second.send(order(ParticipantId{0}, OrderId{3}, Side::Buy, Price{12}, Quantity{3}));
+  ASSERT_TRUE(f.wait_for([&f] { return f.venue().stats().connections_accepted >= 2; }));
+  EXPECT_TRUE(f.shutdown());
 }
 
 TEST(VenueE2E, ManyClientsUnderLoadLeaveTheBookUncrossed) {
