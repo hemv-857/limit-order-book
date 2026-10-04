@@ -15,21 +15,19 @@ target_link_libraries(lob_fuzz_targets PUBLIC lob_protocol lob_journal)
 #   -otherwise              probe, and fall back to the portable driver.
 # The probe only ever reports "Failed", which is why the CI leg spent several
 # rounds guessing at the cause.
+include(CheckCXXSourceCompiles)
 option(LOB_FUZZER_TARGETS "Build the coverage-guided libFuzzer targets" OFF)
 set(LOB_HAVE_LIBFUZZER ${LOB_FUZZER_TARGETS})
 if(NOT LOB_FUZZER_TARGETS)
-  set(_lob_probe_src "${CMAKE_CURRENT_BINARY_DIR}/lob_fuzzer_probe.cc")
-  file(WRITE "${_lob_probe_src}"
-       "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n")
-  # -fsanitize=fuzzer must be on the link line too, or the probe links with no
-  # fuzzer runtime and fails on the missing entry point.
-  try_compile(LOB_HAVE_LIBFUZZER
-              "${CMAKE_CURRENT_BINARY_DIR}/lob_fuzzer_probe"
-              "${_lob_probe_src}"
-              LANGUAGES CXX
-              CXX_STANDARD 20
-              COMPILE_DEFINITIONS -fsanitize=fuzzer
-              LINK_OPTIONS -fsanitize=fuzzer)
+  # -fsanitize=fuzzer has to be a required *link* option as well as a compile
+  # flag; with it only on the compile line the probe links no fuzzer runtime and
+  # fails on the missing entry point.
+  set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
+  set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=fuzzer")
+  check_cxx_source_compiles("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}"
+                            LOB_HAVE_LIBFUZZER)
+  unset(CMAKE_REQUIRED_FLAGS)
+  unset(CMAKE_REQUIRED_LINK_OPTIONS)
 endif()
 
 if(LOB_HAVE_LIBFUZZER)

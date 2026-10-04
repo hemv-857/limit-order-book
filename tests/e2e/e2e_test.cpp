@@ -84,6 +84,19 @@ class VenueFixture {
     return true;
   }
 
+  /// Stop the loop and join the shards so the book can be read without racing.
+  /// state_hash() reaches into the shard engines directly, so calling it while the
+  /// venue is still serving reads memory the workers are mutating. That is not
+  /// theoretical: under concurrent runs the recovered hash mismatched about one
+  /// time in six, because the "before" hash was captured mid-processing.
+  void quiesce() {
+    venue_->stop();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+    venue_->engine().drain();
+  }
+
   template <typename Predicate>
   bool wait_for(Predicate predicate,
                 std::chrono::milliseconds limit = std::chrono::milliseconds(4000)) {
@@ -315,6 +328,16 @@ class JournalledVenue {
     return *venue_;
   }
 
+  /// See VenueFixture::quiesce(): state_hash() races the shard workers unless the
+  /// engine has been drained first.
+  void quiesce() {
+    venue_->stop();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+    venue_->engine().drain();
+  }
+
   template <typename Predicate>
   bool wait_for(Predicate predicate,
                 std::chrono::milliseconds limit = std::chrono::milliseconds(4000)) {
@@ -338,8 +361,13 @@ std::vector<SymbolConfig> one_symbol() {
   return {sym_cfg("XYZ")};
 }
 
+/// Unique per process as well as per test. A fixed name made these tests collide
+/// with any overlapping run -- two ctest invocations, or a rerun while a previous
+/// one was still shutting down -- and the loser would recover from the other's
+/// journal and fail with a confusing hash mismatch. That showed up as an
+/// intermittent failure that would not reproduce.
 std::string temp_journal_path(const char* tag) {
-  return std::string("/tmp/lob_e2e_") + tag + ".journal";
+  return std::string("/tmp/lob_e2e_") + std::to_string(::getpid()) + "_" + tag + ".journal";
 }
 
 TEST(VenueRecovery, AJournalledVenueReplaysIntoAnIdenticalBook) {
@@ -385,14 +413,16 @@ TEST(VenueRecovery, AJournalledVenueReplaysIntoAnIdenticalBook) {
       const TopOfBook t = first.venue().top_of_book(SymbolId{0});
       return t.has_bid || t.has_ask;
     }));
-    before = first.venue().engine().state_hash();
     EXPECT_GT(first.venue().journal_records(), 0u) << "the venue journalled nothing";
+    first.quiesce();
+    before = first.venue().engine().state_hash();
   }  // graceful shutdown: flushes and fsyncs
 
   // A second venue, recovering from the same log.
   {
     JournalledVenue second(path, true, one_symbol());
     ASSERT_NE(second.port(), 0);
+    second.quiesce();
     EXPECT_EQ(second.venue().engine().state_hash(), before)
         << "the recovered book differs from the one that was journalled";
   }
