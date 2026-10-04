@@ -138,10 +138,10 @@ class Venue : public ReactorHandler {
   /// convenient it looks. The value returned is the most recent answer to have
   /// arrived, so it is always a real snapshot taken on the owning thread -- just
   /// not instantaneous. Tests poll it; so would a metrics endpoint.
-  [[nodiscard]] TopOfBook top_of_book(SymbolId symbol) noexcept;
+  [[nodiscard]] TopOfBook top_of_book(SymbolId symbol);
 
   /// Ask the owning shard to report `symbol`'s touch. Non-blocking.
-  void request_top_of_book(SymbolId symbol) noexcept;
+  void request_top_of_book(SymbolId symbol);
 
   /// Open the journal, optionally replaying it first. Called by listen_on().
   bool open_journal();
@@ -171,6 +171,9 @@ class Venue : public ReactorHandler {
   bool routed_body(const protocol::Inbound& message);
   void flush(VenueConnection& conn);
   void close_connection(VenueConnection& conn, std::string_view why);
+  /// Submit any observations queued by request_top_of_book(). Owner thread only.
+  void submit_pending_tops();
+
   void pump_snapshots();
   void pump_market_data();
   void accept_ready();
@@ -191,6 +194,11 @@ class Venue : public ReactorHandler {
   /// that covers the rest of the venue.
   mutable std::mutex tops_mutex_;
   std::unordered_map<std::uint32_t, TopOfBook> last_tops_;
+  // Observations requested from outside the loop. The shard queues are SPSC with
+  // a single producer -- the acceptor loop -- so top_of_book() must not submit
+  // from whichever thread happened to call it. It queues here instead.
+  std::mutex pending_tops_mutex_;
+  std::vector<SymbolId> pending_tops_;
   /// Connections closed during a pump, removed after the iteration rather than
   /// during it.
   std::vector<VenueConnection*> to_close_;

@@ -390,20 +390,37 @@ bool Venue::routed_body(const protocol::Inbound& message) {
   }
 }
 
-TopOfBook Venue::top_of_book(SymbolId symbol) noexcept {
+TopOfBook Venue::top_of_book(SymbolId symbol) {
   request_top_of_book(symbol);
   const std::lock_guard<std::mutex> lock(tops_mutex_);
   const auto it = last_tops_.find(symbol.value);
   return it == last_tops_.end() ? TopOfBook{} : it->second;
 }
 
-void Venue::request_top_of_book(SymbolId symbol) noexcept {
-  SubscribeRequest req;
-  req.seq = sequencer_.next_sequence();
-  req.ts = sequencer_.next_timestamp();
-  req.symbol = symbol;
-  req.session_id = 0;  // 0: an observation, not a subscription
-  (void)engine_.submit(req);
+void Venue::request_top_of_book(SymbolId symbol) {
+  // Queue it rather than submitting here. The shard queues are SPSC and the
+  // acceptor loop is their only producer, so an observer submitting from its own
+  // thread raced the loop's submissions on the same ring: TSan reported the slot
+  // write in push() against the worker's read in pop(), and beyond the race two
+  // producers can claim the same head and lose or duplicate a request.
+  const std::lock_guard<std::mutex> lock(pending_tops_mutex_);
+  pending_tops_.push_back(symbol);
+}
+
+void Venue::submit_pending_tops() {
+  std::vector<SymbolId> pending;
+  {
+    const std::lock_guard<std::mutex> lock(pending_tops_mutex_);
+    pending.swap(pending_tops_);
+  }
+  for (const SymbolId symbol : pending) {
+    SubscribeRequest req;
+    req.seq = sequencer_.next_sequence();
+    req.ts = sequencer_.next_timestamp();
+    req.symbol = symbol;
+    req.session_id = 0;  // 0: an observation, not a subscription
+    (void)engine_.submit(req);
+  }
 }
 
 void Venue::pump_snapshots() {
@@ -519,6 +536,7 @@ void Venue::run() {
     if (listen_fd_ >= 0 && ::poll(&pfd, 1, 20) > 0 && (pfd.revents & POLLIN) != 0) {
       accept_ready();
     }
+    submit_pending_tops();
     pump_snapshots();
     pump_market_data();
     (void)reactor_.poll_once(0);

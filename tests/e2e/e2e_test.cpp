@@ -762,7 +762,11 @@ TEST(VenueE2E, ManyClientsUnderLoadLeaveTheBookUncrossed) {
       << "not every frame was decoded";
   EXPECT_FALSE(f.venue().engine().event_overflow())
       << "a shard's event ring overflowed, so market data was lost";
-  EXPECT_FALSE(f.venue().top_of_book(SymbolId{0}).crossed())
+  // Polled, not read once. top_of_book returns the last snapshot the loop
+  // delivered, so a single immediate read can be a mid-load picture rather than
+  // the settled one -- which is what made this assertion flaky.
+  ASSERT_TRUE(f.wait_for([&f] { return !f.venue().top_of_book(SymbolId{0}).crossed(); },
+                         std::chrono::milliseconds(10000)))
       << "the book was left crossed under concurrent load";
 }
 
