@@ -159,7 +159,7 @@ jobs:
         run: |
           # libFuzzer is a clang runtime; this runner's default gcc has none, so the
           # check in fuzz/CMakeLists.txt failed and the targets were never defined.
-          cmake --preset fuzz -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          cmake --preset fuzz -DLOB_FUZZER_TARGETS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
           cmake --build --preset fuzz -j --target fuzz_codec fuzz_journal fuzz_engine
       - name: Confirm the entry points exist
         # If the runtime does not link, these binaries are absent and the job must

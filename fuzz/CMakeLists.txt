@@ -7,17 +7,30 @@ target_link_libraries(lob_fuzz_targets PUBLIC lob_protocol lob_journal)
 
 # Coverage-guided drivers, built only when the toolchain can link libFuzzer. They
 # are the better driver where available; the portable one is what always runs.
-include(CheckCXXSourceCompiles)
-# The flag has to be a *link* option as well as a compile flag. With it only on the
-# compile line the probe compiles fine and then fails to link on the missing
-# LLVMFuzzerTestOneInput, so the check reports "no libFuzzer" on a toolchain that
-# has it and the targets are never defined.
-set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
-set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=fuzzer")
-check_cxx_source_compiles("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}"
-                          LOB_HAVE_LIBFUZZER)
-unset(CMAKE_REQUIRED_FLAGS)
-unset(CMAKE_REQUIRED_LINK_OPTIONS)
+# Two ways to get the coverage-guided targets:
+#   -LOB_FUZZER_TARGETS=ON  build them, and let the linker decide. This is what CI
+#                           uses, because a missing libFuzzer runtime then fails
+#                           with the actual linker error instead of silently
+#                           skipping the targets and leaving "unknown target".
+#   -otherwise              probe, and fall back to the portable driver.
+# The probe only ever reports "Failed", which is why the CI leg spent several
+# rounds guessing at the cause.
+option(LOB_FUZZER_TARGETS "Build the coverage-guided libFuzzer targets" OFF)
+set(LOB_HAVE_LIBFUZZER ${LOB_FUZZER_TARGETS})
+if(NOT LOB_FUZZER_TARGETS)
+  set(_lob_probe_src "${CMAKE_CURRENT_BINARY_DIR}/lob_fuzzer_probe.cc")
+  file(WRITE "${_lob_probe_src}"
+       "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n")
+  # -fsanitize=fuzzer must be on the link line too, or the probe links with no
+  # fuzzer runtime and fails on the missing entry point.
+  try_compile(LOB_HAVE_LIBFUZZER
+              "${CMAKE_CURRENT_BINARY_DIR}/lob_fuzzer_probe"
+              "${_lob_probe_src}"
+              LANGUAGES CXX
+              CXX_STANDARD 20
+              COMPILE_DEFINITIONS -fsanitize=fuzzer
+              LINK_OPTIONS -fsanitize=fuzzer)
+endif()
 
 if(LOB_HAVE_LIBFUZZER)
   foreach(target codec journal engine)
