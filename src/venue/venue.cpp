@@ -405,6 +405,14 @@ void Venue::request_top_of_book(SymbolId symbol) {
   // write in push() against the worker's read in pop(), and beyond the race two
   // producers can claim the same head and lose or duplicate a request.
   const std::lock_guard<std::mutex> lock(pending_tops_mutex_);
+  // De-duplicated. A caller polling top_of_book() in a wait loop would otherwise
+  // queue thousands of identical observations, each of which costs a shard
+  // request and emits an event -- enough to overflow the event ring under load
+  // and lose market data. One outstanding observation per symbol is enough: the
+  // answer is a snapshot of the book as of when the worker handles it.
+  if (std::find(pending_tops_.begin(), pending_tops_.end(), symbol) != pending_tops_.end()) {
+    return;
+  }
   pending_tops_.push_back(symbol);
 }
 
