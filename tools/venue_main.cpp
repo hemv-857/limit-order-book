@@ -50,17 +50,50 @@ extern "C" void on_signal(int /*signal*/) {
   return fallback;
 }
 
+[[nodiscard]] std::string arg_str(int argc, char** argv, const char* name, const char* fallback) {
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string_view(argv[i]) == name) {
+      return argv[i + 1];
+    }
+  }
+  return fallback;
+}
+
+[[nodiscard]] bool arg_has(int argc, char** argv, const char* name) {
+  for (int i = 1; i < argc; ++i) {
+    if (std::string_view(argv[i]) == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   const auto port = static_cast<std::uint16_t>(arg_or(argc, argv, "--port", 9000));
   const auto shards = static_cast<std::size_t>(arg_or(argc, argv, "--shards", 2));
   const long long count = arg_or(argc, argv, "--symbols", 1);
+  // Journal flags. Without these the venue had no way to produce a journal at
+  // all, so recovery could not be exercised from the command line and the replay
+  // tool had nothing to read.
+  const std::string journal = arg_str(argc, argv, "--journal", "");
+  const bool recover = arg_has(argc, argv, "--recover");
+  const long long segment_mb = arg_or(argc, argv, "--journal-segment-mb", 64);
+  const long long fsync_every = arg_or(argc, argv, "--journal-fsync-records", 4096);
   const bool stop_after_ms = false;
   (void)stop_after_ms;
 
   lob::VenueConfig config;
   config.shards = shards == 0 ? 1 : shards;
+  if (!journal.empty()) {
+    config.journal_path = journal;
+    config.recover_from_journal = recover;
+    config.journal_durability.segment_bytes =
+        segment_mb <= 0 ? 0ULL : static_cast<std::uint64_t>(segment_mb) * 1024ULL * 1024ULL;
+    config.journal_durability.fsync_every_records =
+        fsync_every < 0 ? 0ULL : static_cast<std::uint64_t>(fsync_every);
+  }
   // SymbolConfig::name is a view, so the strings have to outlive the config. Not a
   // dangling view in a test binary that happens to survive: the venue outlives
   // main's locals by however long it runs.
