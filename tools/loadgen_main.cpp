@@ -97,7 +97,6 @@ namespace {
 
 struct Counters {
   std::atomic<std::uint64_t> sent{0};
-  std::atomic<std::uint64_t> rejected{0};
   std::atomic<std::uint64_t> write_failed{0};
   std::atomic<std::uint64_t> latencies_us{0};  // summed; divided by sent at the end
   std::atomic<std::uint64_t> worst_us{0};
@@ -138,7 +137,7 @@ int run(int argc, char** argv) {
         counters.write_failed.fetch_add(1, std::memory_order_relaxed);
         return;
       }
-      std::uint64_t order_id = static_cast<std::uint64_t>(c) * 1'000'000'000ULL + 1ULL;
+      std::uint64_t order_id = (static_cast<std::uint64_t>(c) * 1'000'000'000ULL) + 1ULL;
       // Simple open-loop pacing: one order every 1/rate seconds.
       const auto interval =
           std::chrono::microseconds(1'000'000 / (per_second > 0 ? per_second : 1));
@@ -158,7 +157,11 @@ int run(int argc, char** argv) {
         const auto tick = static_cast<std::int64_t>(order_id % 50U);
         msg.new_order.price = lob::Price{buy ? mid - 100 - tick : mid + 100 + tick};
         msg.new_order.quantity = lob::Quantity{1};
-        msg.new_order.tif = lob::TimeInForce::Day;
+        // GTC, not Day. A Day order is evaluated against the request timestamp,
+        // and loadgen leaves ts at 0, so every order was accepted and journalled
+        // and then expired immediately -- which looked like a venue dropping 96%
+        // of orders when the tool was simply sending the wrong thing.
+        msg.new_order.tif = lob::TimeInForce::GTC;
 
         std::vector<std::uint8_t> buf;
         const auto t0 = std::chrono::steady_clock::now();
@@ -210,7 +213,6 @@ int run(int argc, char** argv) {
   // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("sent:        %llu  (%.0f/s)\n", static_cast<unsigned long long>(sent), rate);
   // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
-  std::printf("rejected:    %llu\n", static_cast<unsigned long long>(counters.rejected.load()));
   // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("write fails: %llu\n", static_cast<unsigned long long>(counters.write_failed.load()));
   if (sent > 0) {
@@ -221,6 +223,10 @@ int run(int argc, char** argv) {
   }
   // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("symbol: %s\n", symbol.c_str());
+  // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
+  std::printf(
+      "note: the venue sends no per-order ack, so this measures delivery,\n"
+      "      not acceptance. Check the resulting book with 'replay'.\n");
 
   // A soak that silently sent almost nothing has proved nothing.
   const std::uint64_t failed = counters.write_failed.load();
