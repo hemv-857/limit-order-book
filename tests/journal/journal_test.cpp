@@ -2,6 +2,8 @@
 
 #include "util/crc32c.hpp"
 
+#include <fcntl.h>
+
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -343,4 +345,141 @@ TEST(Journal, ReplayRebuildsAnIdenticalBook) {
 }
 
 }  // namespace
+}  // namespace lob
+namespace lob {
+
+// ---------------------------------------------------------------------------
+// Durability: fsync cadence and segment rollover
+// ---------------------------------------------------------------------------
+
+namespace {
+JournalRecord order_rec(std::uint64_t id) {
+  const auto seq = static_cast<std::uint64_t>(id);
+  return rec_new(seq, OrderId{seq}, (id % 2U) == 0U ? Side::Buy : Side::Sell,
+                 Price{static_cast<std::int64_t>(100U + id)}, Quantity{1});
+}
+std::string seg_path(const std::string& base, std::uint64_t index) {
+  if (index == 0U) {
+    return base;
+  }
+  char suffix[32];
+  std::snprintf(suffix, sizeof(suffix), ".%06llu", static_cast<unsigned long long>(index));
+  return base + suffix;
+}
+bool exists(const std::string& path) {
+  return ::access(path.c_str(), F_OK) == 0;
+}
+}  // namespace
+
+// A tiny segment limit must actually roll, and every segment must be readable in
+// order. Recovery reads all of them, so a rolled log that loses one is a venue
+// that comes up quietly missing orders.
+TEST(JournalWriter, RollsToANewSegmentWhenTheCurrentOneIsFull) {
+  const std::string base = "/tmp/lob_journal_rot.journal";
+  for (std::uint64_t i = 0; i < 4U; ++i) {
+    ::unlink(seg_path(base, i).c_str());
+  }
+
+  JournalWriter writer;
+  JournalDurability durability;
+  durability.segment_bytes = 512;  // force a roll every few records
+  durability.fsync_every_records = 8;
+  writer.set_durability(durability);
+  ASSERT_TRUE(writer.open(base, false));
+
+  std::vector<std::uint8_t> one;
+  encode_record(order_rec(1), one);
+  const std::uint64_t per_record = one.size();
+  for (std::uint64_t i = 1; i <= 200U; ++i) {
+    ASSERT_TRUE(writer.append(order_rec(i))) << "append failed at " << i;
+  }
+  ASSERT_TRUE(writer.close());
+
+  EXPECT_TRUE(exists(base)) << "the first segment is missing";
+  EXPECT_TRUE(exists(seg_path(base, 1U))) << "the writer never rolled a segment";
+  EXPECT_GT(writer.segments().size(), 1U) << "segments() disagrees with the filesystem";
+
+  // No segment may exceed the configured size by more than one record's slack.
+  for (const std::string& path : writer.segments()) {
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0) << "missing segment " << path;
+    struct stat st{};
+    ASSERT_EQ(::fstat(fd, &st), 0);
+    ::close(fd);
+    EXPECT_LE(static_cast<std::uint64_t>(st.st_size), 512U + per_record * 2U)
+        << path << " grew well past the segment limit";
+  }
+
+  // And the whole thing still replays, in order, with no torn record.
+  const std::string bytes = read_all_segments(base);
+  std::size_t seen = 0;
+  std::uint64_t expected_id = 1;
+  const ReplayReport report = replay(bytes, [&](const JournalRecord& r) {
+    ASSERT_EQ(r.kind, RecordKind::NewOrder);
+    ASSERT_EQ(r.new_order.order_id.value, expected_id);
+    ++expected_id;
+    ++seen;
+  });
+  EXPECT_FALSE(report.truncated) << "a rolled journal replayed with a torn record";
+  EXPECT_EQ(seen, 200U);
+  EXPECT_EQ(report.records_applied, 200U);
+
+  for (const std::string& path : writer.segments()) {
+    ::unlink(path.c_str());
+  }
+}
+
+// read_all_segments must stop at the first gap rather than skipping past it: a
+// missing segment means lost orders, and carrying on would replay a book that is
+// silently missing them.
+TEST(JournalWriter, ASegmentGapStopsTheRead) {
+  const std::string base = "/tmp/lob_journal_gap.journal";
+  ::unlink(base.c_str());
+  ::unlink(seg_path(base, 1U).c_str());
+  ::unlink(seg_path(base, 2U).c_str());
+
+  JournalWriter writer;
+  ASSERT_TRUE(writer.open(base, false));
+  for (std::uint64_t i = 1; i <= 5U; ++i) {
+    ASSERT_TRUE(writer.append(order_rec(i)));
+  }
+  ASSERT_TRUE(writer.close());
+
+  // Forge a later segment out of order: segment 2 exists, segment 1 does not.
+  lob::JournalWriter forge;
+  ASSERT_TRUE(forge.open(seg_path(base, 2U), false));
+  ASSERT_TRUE(forge.append(order_rec(99)));
+  ASSERT_TRUE(forge.close());
+
+  std::size_t seen = 0;
+  (void)replay(read_all_segments(base), [&](const JournalRecord&) { ++seen; });
+  EXPECT_EQ(seen, 5U) << "read_all_segments skipped a gap and read a later segment";
+
+  ::unlink(base.c_str());
+  ::unlink(seg_path(base, 2U).c_str());
+}
+
+// fsync on close is what makes a graceful restart lossless regardless of policy.
+TEST(JournalWriter, CloseIsLosslessWithPeriodicFsyncDisabled) {
+  const std::string base = "/tmp/lob_journal_nosync.journal";
+  ::unlink(base.c_str());
+
+  JournalWriter writer;
+  JournalDurability durability;
+  durability.fsync_every_records = 0;  // periodic fsync off: close() must still save
+  writer.set_durability(durability);
+  ASSERT_TRUE(writer.open(base, false));
+  for (std::uint64_t i = 1; i <= 50U; ++i) {
+    ASSERT_TRUE(writer.append(order_rec(i)));
+  }
+  ASSERT_TRUE(writer.close());
+
+  std::size_t seen = 0;
+  const ReplayReport report =
+      replay(read_all_segments(base), [&](const JournalRecord&) { ++seen; });
+  EXPECT_EQ(seen, 50U) << "close() lost records with periodic fsync disabled";
+  EXPECT_EQ(report.records_applied, 50U);
+  ::unlink(base.c_str());
+}
+
 }  // namespace lob

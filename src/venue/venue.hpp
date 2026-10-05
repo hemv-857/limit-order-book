@@ -56,6 +56,10 @@ struct VenueConfig {
   /// Rebuild the book by replaying `journal_path` before serving. The replay reads
   /// the file *before* the writer truncates it, so recovery and appending compose.
   bool recover_from_journal = false;
+  /// Crash durability and segment rollover. Defaults are deliberately modest:
+  /// periodic fsync bounds crash loss without an fsync per order, and 64 MiB
+  /// segments keep any one file cheap to read during recovery.
+  JournalDurability journal_durability{};
 };
 
 /// One live connection: its socket, its session state, and its market data state.

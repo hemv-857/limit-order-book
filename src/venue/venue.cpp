@@ -108,7 +108,7 @@ bool Venue::open_journal() {
   if (config_.recover_from_journal) {
     // Replay BEFORE opening for append. The writer opens with O_TRUNC, so opening
     // first would destroy the very log being recovered from.
-    const std::string bytes = read_file(config_.journal_path);
+    const std::string bytes = read_all_segments(config_.journal_path);
     if (!bytes.empty()) {
       // Replay through the shards rather than a standalone Engine: that is where
       // the book lives, and submitting in journal order reproduces it exactly.
@@ -157,6 +157,7 @@ bool Venue::open_journal() {
                    ok ? "" : " -- SHARD REFUSED A RECORD");
     }
   }
+  journal_.set_durability(config_.journal_durability);
   return journal_.open(config_.journal_path, config_.recover_from_journal);
 }
 

@@ -67,18 +67,42 @@ struct ReplayReport {
   bool truncated = false;  ///< a torn tail was found and discarded
 };
 
+/// Every segment belonging to `base_path`, concatenated in write order.
+///
+/// The base file first, then `<base_path>.000001`, `.000002`, ... up to the first
+/// gap. A gap ends the journal: a missing segment means records are lost, and
+/// silently continuing past it would replay a book that is quietly missing orders.
+/// Only a torn *tail* (the last segment) is safe to tolerate, and `replay`
+/// already handles that.
+std::string read_all_segments(const std::string& base_path);
+
 /// Read every intact record from `bytes` and feed it to `sink` in order.
 /// Stops cleanly at the first torn or corrupt record and sets `truncated`.
 ReplayReport replay(std::string_view bytes, const std::function<void(const JournalRecord&)>& sink);
 
+/// How often the writer forces buffered records all the way to stable storage.
+struct JournalDurability {
+  /// fsync after this many records have been written. 0 disables periodic fsync,
+  /// leaving only the fsync on close -- i.e. graceful-restart safety only.
+  /// 1 gives per-record durability at the cost of an fsync per order, which is
+  /// almost never what a venue wants; the useful middle ground is a few thousand.
+  std::uint64_t fsync_every_records = 4096;
+  /// Roll to a new segment once the current one reaches this many bytes. 0 keeps
+  /// a single file forever. Bounds disk growth and keeps any one file small
+  /// enough to read quickly during recovery.
+  std::uint64_t segment_bytes = 64ULL * 1024ULL * 1024ULL;
+};
+
 /// Append-only writer for the journal.
 ///
-/// Buffers records and writes them in batches. **It does not fsync**, so it
-/// guarantees a *graceful* restart loses nothing, while a crash or power loss can
-/// lose whatever was still buffered. That is a deliberate, documented limit rather
-/// than an oversight: real crash durability needs an fsync policy and a decision
-/// about what a venue may promise, and guessing one here would be worse than
-/// saying so. `flush()` on shutdown is what makes the graceful case safe.
+/// Buffers records, writes them in batches, and fsyncs on a configurable cadence
+/// so that a crash loses at most `JournalDurability::fsync_every_records`
+/// records rather than everything still buffered. `close()` always flushes and
+/// fsyncs, which is what makes the graceful case safe regardless of policy.
+///
+/// Segments: when `segment_bytes` is reached the writer rolls to
+/// `<path>.<NNNNNN>`, starting from `<path>.<000001>`. `close()` flushes the
+/// active segment, so the highest-numbered segment is always the open one.
 class JournalWriter {
  public:
   JournalWriter() = default;
@@ -95,6 +119,15 @@ class JournalWriter {
   /// because nothing was replayed and any existing file is stale.
   bool open(const std::string& path, bool append = false);
 
+  /// Durability policy. Must be set before open() to affect the first segment.
+  void set_durability(const JournalDurability& durability) noexcept {
+    durability_ = durability;
+  }
+
+  /// Force buffered records to stable storage now. This is the call an operator
+  /// makes before declaring a checkpoint good.
+  bool sync();
+
   [[nodiscard]] bool is_open() const noexcept {
     return fd_ >= 0;
   }
@@ -108,8 +141,12 @@ class JournalWriter {
   /// Push buffered records to the file. Does not fsync.
   bool flush();
 
-  /// Flush and fsync, then close. Called on graceful shutdown.
+  /// Flush and fsync the active segment, then close. Called on graceful shutdown.
   bool close();
+
+  /// Base path and the segments currently open, lowest first. Used by the replay
+  /// tool and by recovery, which must read every segment in order.
+  [[nodiscard]] std::vector<std::string> segments() const;
 
   /// False once any write has failed. The venue keeps serving but the operator
   /// needs to know the journal is no longer trustworthy.
@@ -127,7 +164,16 @@ class JournalWriter {
   }
 
  private:
+  /// Roll to the next segment if the current one is full. Caller flushes first.
+  bool rotate();
+  [[nodiscard]] std::string segment_path(std::uint64_t index) const;
+
   int fd_ = -1;
+  std::string base_path_;
+  std::uint64_t segment_index_ = 0;
+  std::uint64_t segment_written_ = 0;
+  std::uint64_t since_sync_ = 0;
+  JournalDurability durability_{};
   std::vector<std::uint8_t> buffer_;
   std::atomic<std::uint64_t> written_{0};
   std::atomic<std::uint64_t> bytes_{0};

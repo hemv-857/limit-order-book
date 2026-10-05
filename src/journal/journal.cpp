@@ -343,9 +343,112 @@ bool JournalWriter::open(const std::string& path, bool append) {
   buffer_.clear();
   buffer_.reserve(kFlushThreshold + 256U);
   healthy_ = true;
+  base_path_ = path;
+  segment_index_ = 0;
+  segment_written_ = 0;
+  since_sync_ = 0;
   written_.store(0, std::memory_order_relaxed);
   bytes_.store(0, std::memory_order_relaxed);
   return true;
+}
+
+std::string JournalWriter::segment_path(std::uint64_t index) const {
+  if (index == 0U) {
+    return base_path_;
+  }
+  char suffix[32];
+  std::snprintf(suffix, sizeof(suffix), ".%06llu", static_cast<unsigned long long>(index));
+  return base_path_ + suffix;
+}
+
+std::vector<std::string> JournalWriter::segments() const {
+  std::vector<std::string> out;
+  if (base_path_.empty()) {
+    return out;
+  }
+  out.push_back(segment_path(0U));
+  for (std::uint64_t i = 1U; i <= segment_index_; ++i) {
+    out.push_back(segment_path(i));
+  }
+  return out;
+}
+
+bool JournalWriter::rotate() {
+  if (fd_ >= 0) {
+    // Flush and fsync before moving on: an earlier segment must be durable or the
+    // next crash loses the end of it with no way to know the file stops there.
+    if (!flush()) {
+      return false;
+    }
+    if (::fsync(fd_) != 0) {
+      healthy_ = false;
+      return false;
+    }
+    (void)::close(fd_);
+  }
+  ++segment_index_;
+  const std::string next = segment_path(segment_index_);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open() is variadic.
+  fd_ = ::open(next.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd_ < 0) {
+    healthy_ = false;
+    return false;
+  }
+  segment_written_ = 0;
+  since_sync_ = 0;
+  return true;
+}
+
+bool JournalWriter::sync() {
+  if (fd_ < 0) {
+    return false;
+  }
+  if (!flush()) {
+    return false;
+  }
+  if (::fsync(fd_) != 0) {
+    healthy_ = false;
+    return false;
+  }
+  since_sync_ = 0;
+  return true;
+}
+
+std::string read_all_segments(const std::string& base_path) {
+  std::string out;
+  const auto slurp = [&out](const std::string& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+      return false;
+    }
+    char buf[65536];
+    while (true) {
+      const ssize_t n = ::read(fd, buf, sizeof(buf));
+      if (n > 0) {
+        out.append(buf, static_cast<std::size_t>(n));
+        continue;
+      }
+      break;
+    }
+    ::close(fd);
+    return true;
+  };
+  (void)slurp(base_path);
+  for (std::uint64_t i = 1U;; ++i) {
+    char suffix[32];
+    std::snprintf(suffix, sizeof(suffix), ".%06llu", static_cast<unsigned long long>(i));
+    const std::string path = base_path + suffix;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open() is variadic.
+    const int probe = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (probe < 0) {
+      break;  // first gap ends the journal
+    }
+    ::close(probe);
+    if (!slurp(path)) {
+      break;
+    }
+  }
+  return out;
 }
 
 bool JournalWriter::append(const JournalRecord& record) {
@@ -354,8 +457,24 @@ bool JournalWriter::append(const JournalRecord& record) {
   }
   encode_record(record, buffer_);
   written_.fetch_add(1, std::memory_order_relaxed);
-  if (buffer_.size() >= kFlushThreshold) {
-    return flush();
+  ++since_sync_;
+  if (buffer_.size() >= kFlushThreshold && !flush()) {
+    return false;
+  }
+  // Deliberately not inside the flush branch. Tying rollover to the 64 KiB flush
+  // threshold means a small segment limit never takes effect until the buffer
+  // fills, so a venue configured for 1 MiB segments silently wrote one giant file.
+  // rotate() and sync() each flush first, so the checks are safe at any size.
+  if (durability_.segment_bytes != 0U &&
+      segment_written_ + buffer_.size() >= durability_.segment_bytes) {
+    if (!rotate()) {
+      return false;
+    }
+  }
+  // This is the whole crash-durability story: a crash now costs at most
+  // fsync_every_records records rather than the whole buffer.
+  if (durability_.fsync_every_records != 0U && since_sync_ >= durability_.fsync_every_records) {
+    return sync();
   }
   return true;
 }
@@ -378,7 +497,8 @@ bool JournalWriter::flush() {
     healthy_ = false;
     return false;
   }
-  bytes_ += buffer_.size();
+  bytes_.fetch_add(buffer_.size(), std::memory_order_relaxed);
+  segment_written_ += buffer_.size();
   buffer_.clear();
   return true;
 }
