@@ -6,3 +6,6 @@ target_link_libraries(lobctl PRIVATE lob_protocol lob_warnings)
 
 add_executable(replay replay_main.cpp)
 target_link_libraries(replay PRIVATE lob_journal lob_core lob_warnings)
+
+add_executable(loadgen loadgen_main.cpp)
+target_link_libraries(loadgen PRIVATE lob_protocol lob_core lob_warnings)
