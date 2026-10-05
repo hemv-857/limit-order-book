@@ -356,9 +356,11 @@ std::string JournalWriter::segment_path(std::uint64_t index) const {
   if (index == 0U) {
     return base_path_;
   }
-  char suffix[32];
-  std::snprintf(suffix, sizeof(suffix), ".%06llu", static_cast<unsigned long long>(index));
-  return base_path_ + suffix;
+  std::array<char, 32> suffix{};
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
+  std::snprintf(suffix.data(), suffix.size(), ".%06llu", static_cast<unsigned long long>(index));
+  return base_path_ + suffix.data();
 }
 
 std::vector<std::string> JournalWriter::segments() const {
@@ -384,7 +386,10 @@ bool JournalWriter::rotate() {
       healthy_ = false;
       return false;
     }
-    (void)::close(fd_);
+    if (::close(fd_) != 0) {
+      healthy_ = false;
+      return false;
+    }
   }
   ++segment_index_;
   const std::string next = segment_path(segment_index_);
@@ -417,33 +422,35 @@ bool JournalWriter::sync() {
 std::string read_all_segments(const std::string& base_path) {
   std::string out;
   const auto slurp = [&out](const std::string& path) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
       return false;
     }
-    char buf[65536];
+    std::array<char, 65536> buf{};
     while (true) {
-      const ssize_t n = ::read(fd, buf, sizeof(buf));
-      if (n > 0) {
-        out.append(buf, static_cast<std::size_t>(n));
-        continue;
+      const ssize_t n = ::read(fd, buf.data(), buf.size());
+      if (n <= 0) {
+        break;
       }
-      break;
+      out.append(buf.data(), static_cast<std::size_t>(n));
     }
     ::close(fd);
     return true;
   };
   (void)slurp(base_path);
   for (std::uint64_t i = 1U;; ++i) {
-    char suffix[32];
-    std::snprintf(suffix, sizeof(suffix), ".%06llu", static_cast<unsigned long long>(i));
-    const std::string path = base_path + suffix;
+    std::array<char, 32> suffix{};
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
+    std::snprintf(suffix.data(), suffix.size(), ".%06llu", static_cast<unsigned long long>(i));
+    const std::string path = base_path + suffix.data();
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open() is variadic.
     const int probe = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (probe < 0) {
       break;  // first gap ends the journal
     }
-    ::close(probe);
+    (void)::close(probe);
     if (!slurp(path)) {
       break;
     }

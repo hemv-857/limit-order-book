@@ -7,8 +7,11 @@
 // The point is operational: an operator who has a journal from a crashed venue
 // needs to know whether it is intact, how far it gets, and what book it produces
 // -- without starting a venue and hoping.
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -19,6 +22,8 @@
 namespace {
 
 int usage() {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::fprintf(stderr,
                "usage: replay <journal-path> [--verify] [--dump N] [--symbol N]\n"
                "  --verify   rebuild the book and print the resulting state hash\n"
@@ -45,7 +50,7 @@ const char* kind_name(lob::RecordKind kind) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
   if (argc < 2) {
     return usage();
   }
@@ -71,6 +76,8 @@ int main(int argc, char** argv) {
   // and reading only the first would silently under-report what was recovered.
   const std::string bytes = lob::read_all_segments(path);
   if (bytes.empty()) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
     std::fprintf(stderr, "replay: %s is empty or unreadable\n", path.c_str());
     return 1;
   }
@@ -82,7 +89,7 @@ int main(int argc, char** argv) {
   std::uint64_t max_symbol = 0;
   {
     std::size_t ignored = 0;
-    (void)lob::replay(bytes, [&](const lob::JournalRecord& r) {
+    lob::replay(bytes, [&](const lob::JournalRecord& r) {
       std::uint64_t s = 0;
       switch (r.kind) {
         case lob::RecordKind::NewOrder:
@@ -100,9 +107,7 @@ int main(int argc, char** argv) {
         case lob::RecordKind::Invalid:
           break;
       }
-      if (s > max_symbol) {
-        max_symbol = s;
-      }
+      max_symbol = std::max(max_symbol, s);
       ++ignored;
     });
   }
@@ -113,7 +118,7 @@ int main(int argc, char** argv) {
   std::int64_t lowest = 0;
   std::int64_t highest = 0;
   bool first_price = true;
-  (void)lob::replay(bytes, [&](const lob::JournalRecord& r) {
+  lob::replay(bytes, [&](const lob::JournalRecord& r) {
     if (r.kind != lob::RecordKind::NewOrder) {
       return;
     }
@@ -123,12 +128,8 @@ int main(int argc, char** argv) {
       highest = p;
       first_price = false;
     } else {
-      if (p < lowest) {
-        lowest = p;
-      }
-      if (p > highest) {
-        highest = p;
-      }
+      lowest = std::min(lowest, p);
+      highest = std::max(highest, p);
     }
   });
   const std::int64_t pad = 64;
@@ -145,7 +146,7 @@ int main(int argc, char** argv) {
   }
 
   lob::Engine engine(symbols, lob::EngineConfig{});
-  std::size_t counts[5] = {0, 0, 0, 0, 0};
+  std::array<std::size_t, 5> counts{};
   std::size_t applied = 0;
   std::size_t printed = 0;
 
@@ -171,9 +172,13 @@ int main(int argc, char** argv) {
         break;
     }
     if (dump != 0U && printed < dump) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+      // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
       std::printf("%-12s", kind_name(r.kind));
       switch (r.kind) {
         case lob::RecordKind::NewOrder:
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+          // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
           std::printf(" symbol=%llu order=%llu %s qty=%lld price=%lld",
                       static_cast<unsigned long long>(r.new_order.symbol.value),
                       static_cast<unsigned long long>(r.new_order.order_id.value),
@@ -182,24 +187,34 @@ int main(int argc, char** argv) {
                       static_cast<long long>(r.new_order.price.value));
           break;
         case lob::RecordKind::Cancel:
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+          // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
           std::printf(" symbol=%llu order=%llu",
                       static_cast<unsigned long long>(r.cancel.symbol.value),
                       static_cast<unsigned long long>(r.cancel.order_id.value));
           break;
         case lob::RecordKind::Replace:
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+          // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
           std::printf(" symbol=%llu order=%llu new_qty=%lld",
                       static_cast<unsigned long long>(r.replace.symbol.value),
                       static_cast<unsigned long long>(r.replace.order_id.value),
                       static_cast<long long>(r.replace.new_quantity.value));
           break;
         case lob::RecordKind::MassCancel:
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+          // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
           std::printf(" participant=%llu",
                       static_cast<unsigned long long>(r.mass_cancel.participant.value));
           break;
         case lob::RecordKind::Invalid:
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+          // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
           std::printf(" (undecodable)");
           break;
       }
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+      // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
       std::printf("\n");
       ++printed;
     }
@@ -231,16 +246,16 @@ int main(int argc, char** argv) {
     // reach the same book, including refusing the same requests.
     switch (r.kind) {
       case lob::RecordKind::NewOrder:
-        (void)engine.submit(r.new_order);
+        engine.submit(r.new_order);
         break;
       case lob::RecordKind::Cancel:
-        (void)engine.submit(r.cancel);
+        engine.submit(r.cancel);
         break;
       case lob::RecordKind::Replace:
-        (void)engine.submit(r.replace);
+        engine.submit(r.replace);
         break;
       case lob::RecordKind::MassCancel:
-        (void)engine.submit(r.mass_cancel);
+        engine.submit(r.mass_cancel);
         break;
       case lob::RecordKind::Invalid:
         break;
@@ -248,18 +263,32 @@ int main(int argc, char** argv) {
     ++applied;
   });
 
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("journal:  %s\n", path.c_str());
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("bytes:    %zu\n", report.bytes_consumed);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("records:  %zu new_order  %zu cancel  %zu replace  %zu mass_cancel\n", counts[0],
               counts[1], counts[2], counts[3]);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("torn:     %s\n", report.truncated ? "yes (tail discarded)" : "no");
   if (verify) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
     std::printf("applied:  %zu\n", applied);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
     std::printf("hash:     %016llx\n", static_cast<unsigned long long>(engine.state_hash()));
     for (std::size_t i = 0; i < symbols.size(); ++i) {
       const lob::SymbolId id{static_cast<std::uint32_t>(i)};
       const lob::TopOfBook top = engine.book(id).top_of_book();
       if (top.has_bid || top.has_ask) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+        // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
         std::printf("  symbol %zu: bid=%lldx%lld ask=%lldx%lld crossed=%s\n", i,
                     static_cast<long long>(top.best_bid.value),
                     static_cast<long long>(top.best_bid_qty.value),
@@ -271,4 +300,16 @@ int main(int argc, char** argv) {
   // A torn tail is worth a non-zero exit: the operator asked whether this journal
   // is trustworthy and the answer is "up to the last record".
   return report.truncated ? 3 : 0;
+}
+
+int main(int argc, char** argv) {
+  // An operator tool that dies on an unhandled exception, printing a stack trace,
+  // is worse than one that says what went wrong.
+  try {
+    return run(argc, argv);
+  } catch (const std::exception& error) {
+    // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
+    std::fprintf(stderr, "replay: %s\n", error.what());
+    return 1;
+  }
 }
