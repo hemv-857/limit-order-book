@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <exception>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -59,6 +60,7 @@ namespace {
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- sockaddr_in to sockaddr.
   if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
     ::close(fd);
     return -1;
@@ -103,7 +105,7 @@ struct Counters {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
   const auto port = static_cast<std::uint16_t>(arg_or(argc, argv, "--port", 9000));
   const auto seconds = arg_or(argc, argv, "--seconds", 10);
   const auto connections = arg_or(argc, argv, "--connections", 4);
@@ -111,6 +113,7 @@ int main(int argc, char** argv) {
   const std::string symbol = arg_str(argc, argv, "--symbol", "SYM0");
 
   if (seconds <= 0 || connections <= 0) {
+    // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
     std::fprintf(stderr,
                  "usage: loadgen --port P [--seconds N] [--connections N] "
                  "[--rate N] [--symbol NAME]\n");
@@ -152,8 +155,8 @@ int main(int argc, char** argv) {
         msg.new_order.side = buy ? lob::Side::Buy : lob::Side::Sell;
         // order_id is unsigned, so the offset is cast before it is subtracted
         // from the signed midpoint.
-        const auto offset = static_cast<std::int64_t>(order_id % 50U);
-        msg.new_order.price = lob::Price{buy ? mid - 100 - offset : mid + 100 + offset};
+        const auto tick = static_cast<std::int64_t>(order_id % 50U);
+        msg.new_order.price = lob::Price{buy ? mid - 100 - tick : mid + 100 + tick};
         msg.new_order.quantity = lob::Quantity{1};
         msg.new_order.tif = lob::TimeInForce::Day;
 
@@ -233,4 +236,15 @@ int main(int argc, char** argv) {
     return 1;
   }
   return 0;
+}
+
+int main(int argc, char** argv) {
+  // A load tool that dies on an unhandled exception tells the operator nothing.
+  try {
+    return run(argc, argv);
+  } catch (const std::exception& error) {
+    // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
+    std::fprintf(stderr, "loadgen: %s\n", error.what());
+    return 1;
+  }
 }
