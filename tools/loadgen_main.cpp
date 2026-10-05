@@ -150,8 +150,10 @@ int main(int argc, char** argv) {
         // Alternate sides but keep prices apart so nothing crosses.
         const bool buy = (order_id % 2U) == 0U;
         msg.new_order.side = buy ? lob::Side::Buy : lob::Side::Sell;
-        msg.new_order.price =
-            lob::Price{buy ? mid - 100 - (order_id % 50) : mid + 100 + (order_id % 50)};
+        // order_id is unsigned, so the offset is cast before it is subtracted
+        // from the signed midpoint.
+        const auto offset = static_cast<std::int64_t>(order_id % 50U);
+        msg.new_order.price = lob::Price{buy ? mid - 100 - offset : mid + 100 + offset};
         msg.new_order.quantity = lob::Quantity{1};
         msg.new_order.tif = lob::TimeInForce::Day;
 
@@ -201,8 +203,9 @@ int main(int argc, char** argv) {
   // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("connections: %lld  duration: %.1fs\n", connections, secs);
   // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
-  std::printf("sent:        %llu  (%.0f/s)\n", static_cast<unsigned long long>(sent),
-              sent / (secs > 0 ? secs : 1));
+  const auto rate = static_cast<double>(sent) / (secs > 0 ? secs : 1);
+  // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
+  std::printf("sent:        %llu  (%.0f/s)\n", static_cast<unsigned long long>(sent), rate);
   // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
   std::printf("rejected:    %llu\n", static_cast<unsigned long long>(counters.rejected.load()));
   // NOLINTNEXTLINE(cert-err33-c,cppcoreguidelines-pro-type-vararg)
