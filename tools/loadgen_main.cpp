@@ -22,8 +22,9 @@
 #include <thread>
 #include <vector>
 
+#include "core/config.hpp"
 #include "core/types.hpp"
-#include "protocol/protocol.hpp"
+#include "protocol/codec.hpp"
 
 namespace {
 
