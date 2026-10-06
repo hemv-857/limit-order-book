@@ -38,14 +38,22 @@ session where it cannot be properly tested.
 
 ## Not measured
 
-- **No long-running soak.** `loadgen` exists and one 20-second run is recorded in
-  the git history, but nothing runs it in CI, so a throughput or latency
-  regression would not be caught. A CI job that runs loadgen against the venue
-  and asserts on orders actually resting in the book would close this.
-- **Recovery has only been exercised from graceful shutdown and from a
-  deliberately torn tail.** A real `kill -9` mid-write has not been tested
-  against the fsync cadence, so the "at most `fsync_every_records` lost" claim
-  is reasoned from the code rather than measured.
+- **Recovery has not been tested against a machine-level crash.** `kill -9` was
+  measured: 2,000 orders sent, 2,000 in the journal, no torn tail. But that is a
+  weaker result than it looks, and the distinction matters:
+
+  `kill -9` kills the process, not the kernel, so everything already written
+  survives in the OS page cache. Only records still sitting in the writer's
+  userspace buffer are lost, which the 64 KiB flush threshold bounds -- at ~85
+  bytes per record, under 800 records. What `fsync` actually protects against is
+  power loss or a kernel panic, where unwritten page-cache data is gone. That
+  cannot be simulated here, so the durability claim rests on the code rather
+  than on an observation.
+
+- **The soak is short.** CI runs 15 seconds at 500/s per connection
+  (~30,000 orders), which is enough to catch a throughput collapse, a journal
+  regression or a book that ends up crossed. It is not a long-running leak or
+  latency-drift test; nothing measures how behaviour changes over hours.
 
 ## Deliberate limits
 

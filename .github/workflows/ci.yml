@@ -84,6 +84,59 @@ jobs:
           source scripts/env.sh
           ./scripts/tidy.sh
 
+  # ---- soak --------------------------------------------------------------
+  # Sustained load through a live venue, then replay the journal it produced.
+  #
+  # This exists because loadgen and the journal were both built and then never run
+  # together by anything automated. The assertion that matters is the replay: it
+  # proves the orders actually landed in the book and that the log rebuilds it,
+  # which is what a throughput-only check would miss.
+  soak:
+    name: soak (load, then replay the journal)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build venue, loadgen and replay
+        run: |
+          cmake --preset release
+          cmake --build --preset release -j --target venue loadgen replay
+      - name: Drive load, then verify the journal
+        run: |
+          set -euo pipefail
+          rm -f /tmp/soak.journal*
+          LOG="$(mktemp)"
+          ./build/release/bin/venue --port 0 --journal /tmp/soak.journal \
+                                    --journal-segment-mb 2 >"$LOG" 2>&1 &
+          VENUE=$!
+          trap 'kill -TERM $VENUE 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do
+            grep -q 'venue: listening' "$LOG" && break
+            kill -0 $VENUE 2>/dev/null || { echo "::error::venue exited on startup"; cat "$LOG"; exit 1; }
+            sleep 0.1
+          done
+          grep -q 'venue: listening' "$LOG" || { echo "::error::no listen banner"; cat "$LOG"; exit 1; }
+          PORT="$(sed -n 's/.*127\.0\.1:\([0-9]*\).*/\1/p' "$LOG" | head -1)"
+          test -n "$PORT" || { echo "::error::could not read the bound port"; exit 1; }
+
+          ./build/release/bin/loadgen --port "$PORT" --seconds 15 --connections 4 --rate 500
+          kill -TERM $VENUE
+          wait $VENUE || { echo "::error::venue did not exit cleanly"; cat "$LOG"; exit 1; }
+
+          # A segment limit of 2 MiB should have produced more than one file; if it
+          # did not, rollover is not actually running and the next assertion would
+          # pass while testing the wrong thing.
+          SEGMENTS=$(ls /tmp/soak.journal* | wc -l)
+          echo "segments: $SEGMENTS"
+          test "$SEGMENTS" -ge 2 || {
+            echo "::error::expected segment rollover, found $SEGMENTS file(s)"; exit 1; }
+
+          ./build/release/bin/replay /tmp/soak.journal --verify
+          RECORDS=$(./build/release/bin/replay /tmp/soak.journal | sed -n 's/^records:  \([0-9]*\).*/\1/p')
+          test "${RECORDS:-0}" -gt 1000 || {
+            echo "::error::only ${RECORDS:-0} records journalled; the run proved nothing"; exit 1; }
+          ./build/release/bin/replay /tmp/soak.journal --verify | grep -q 'crossed=no' || {
+            echo "::error::the book was left crossed after sustained load"; exit 1; }
+
   # ---- fuzzing --------------------------------------------------------------
   # Runs on macOS with the portable driver under ASan+UBSan. The libFuzzer job
   # below is where coverage-guided search happens.
