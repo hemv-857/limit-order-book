@@ -105,7 +105,7 @@ jobs:
           set -euo pipefail
           rm -f /tmp/soak.journal*
           LOG="$(mktemp)"
-          ./build/release/bin/venue --port 0 --journal /tmp/soak.journal \
+          ./build/release/bin/venue --port 19500 --journal /tmp/soak.journal \
                                     --journal-segment-mb 2 >"$LOG" 2>&1 &
           VENUE=$!
           trap 'kill -TERM $VENUE 2>/dev/null || true' EXIT
@@ -115,8 +115,11 @@ jobs:
             sleep 0.1
           done
           grep -q 'venue: listening' "$LOG" || { echo "::error::no listen banner"; cat "$LOG"; exit 1; }
-          PORT="$(sed -n 's/.*127\.0\.1:\([0-9]*\).*/\1/p' "$LOG" | head -1)"
-          test -n "$PORT" || { echo "::error::could not read the bound port"; exit 1; }
+          # Fixed port rather than --port 0 plus parsing the banner. The banner
+          # regex matched locally and produced nothing on the runner, and a soak
+          # gate that fails on a regex is worse than useless. Fixed ports per job
+          # do not collide: GitHub runners are single-tenant.
+          PORT=19500
 
           ./build/release/bin/loadgen --port "$PORT" --seconds 15 --connections 4 --rate 500
           kill -TERM $VENUE
