@@ -37,13 +37,13 @@ jobs:
       matrix:
         preset: [debug, release, asan-ubsan, tsan, release-portable]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache the repo-local toolchain
         # bootstrap.sh installs ninja, clang-format and clang-tidy into .venv, so
         # the cache key is the script itself plus the lock file: change how tools
         # are installed and the cache invalidates.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
@@ -68,8 +68,8 @@ jobs:
     name: format and tidy
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
@@ -95,7 +95,7 @@ jobs:
     name: soak (load, then replay the journal)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build venue, loadgen and replay
         run: |
           cmake --preset release
@@ -147,8 +147,8 @@ jobs:
     name: fuzz (portable driver, asan+ubsan)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
@@ -169,10 +169,10 @@ jobs:
       matrix:
         preset: [release, asan-ubsan, tsan]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache CMake and FetchContent deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/release/_deps
@@ -195,9 +195,9 @@ jobs:
     name: fuzz (libFuzzer)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Cache CMake and FetchContent deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/release/_deps
           key: deps-${{ runner.os }}-gcc-${{ hashFiles('cmake/Dependencies.cmake') }}
@@ -242,7 +242,7 @@ jobs:
           done
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crash-artifacts
           path: fuzz/crash-*
@@ -257,8 +257,8 @@ jobs:
     name: benchmarks
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
@@ -274,7 +274,7 @@ jobs:
             --benchmark_format=json \
             --benchmark_out=bench.json
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
           path: bench.json
@@ -287,8 +287,8 @@ jobs:
     name: venue smoke
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'requirements-dev.lock') }}
