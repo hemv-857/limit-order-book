@@ -1,5 +1,7 @@
 # limit-order-book
 
+<a href="https://github.com/hemv-857/limit-order-book/actions/workflows/ci.yml"><img src="https://github.com/hemv-857/limit-order-book/actions/workflows/ci.yml/badge.svg" alt="limit-order-book CI"></a> <a href="https://github.com/hemv-857/limit-order-book/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a> <img src="https://img.shields.io/badge/C++-00599C.svg" alt="C++">
+
 A deterministic limit order book and matching engine in C++20, built to run as a
 real exchange venue: correctness first, then determinism, then performance.
 
