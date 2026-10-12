@@ -206,3 +206,9 @@ cmake/          warnings, sanitizers, dependencies, coverage
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+## Contributing
+
+Open a PR. CI runs on every push and pull request and must be green before merge ([workflow](.github/workflows/ci.yml)).
+
+Keep commits conventional — `type: description`.
